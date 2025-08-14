@@ -1,0 +1,28 @@
+name: smartstock_flutter_only
+description: SmartStock - Flutter-only MVP with on-device NLU and Firestore transactions
+publish_to: "none"
+
+environment:
+  sdk: ">=3.3.0 <4.0.0"
+
+dependencies:
+  flutter:
+    sdk: flutter
+  flutter_riverpod: any
+  firebase_core: any
+  cloud_firestore: any
+  firebase_auth: any
+  shared_preferences: any
+  share_plus: any
+  intl: any
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: any
+
+flutter:
+    uses-material-design: true
+    assets:
+    - assets/brand/logo_black.png
+    - assets/brand/logo_white.png

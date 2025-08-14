@@ -1,0 +1,31 @@
+// SmartStock Firestore Security Rules (Flutter-only MVP)
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function isSignedIn() { return request.auth != null; }
+    function userDoc(uid) { return get(/databases/$(database)/documents/usuarios/$(uid)); }
+    function userRole() { return isSignedIn() ? userDoc(request.auth.uid).data.role : null; }
+    function isAdmin() { return userRole() == "admin"; }
+    function isStaff() { return userRole() == "staff" || isAdmin(); }
+
+    match /usuarios/{uid} {
+      allow read: if isSignedIn() && request.auth.uid == uid;
+      allow write: if isSignedIn() && request.auth.uid == uid; // ajuste conforme sua política
+    }
+
+    match /produtos/{id} {
+      allow read: if isSignedIn();
+      // Somente admin cria/edita produtos
+      allow create, update, delete: if isAdmin();
+    }
+
+    match /movimentacoes/{id} {
+      allow read: if isSignedIn();
+      // Qualquer staff (ou admin) pode registrar movimentação
+      allow create: if isStaff();
+      // Histórico imutável
+      allow update, delete: if false;
+    }
+  }
+}
