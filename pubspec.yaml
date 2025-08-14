@@ -15,6 +15,7 @@ dependencies:
   shared_preferences: any
   share_plus: any
   intl: any
+  firebase_data_connect: ^0.2.0+1
 
 dev_dependencies:
   flutter_test:
