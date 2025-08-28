@@ -1,109 +1,121 @@
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
+import 'package:flutter/foundation.dart' show mapEquals;
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-import 'tenant_provider.dart';
-import 'tenant_join_create_page.dart';
 
-class TenantGate extends ConsumerStatefulWidget {
-  const TenantGate({super.key});
+import '../../features/tenant/tenant_provider.dart';
+import '../../features/tenant/tenant_join_create_page.dart';
+
+/// Observa o documento de membership do usuário na loja.
+/// Retorna o Map com os campos do membership ou null se não existir.
+final membershipProvider =
+    StreamProvider.autoDispose.family<Map<String, dynamic>?, String>(
+  (ref, tenantId) {
+    final uid = FirebaseAuth.instance.currentUser?.uid;
+    if (uid == null) return const Stream.empty();
+
+    final docRef = FirebaseFirestore.instance
+        .collection('tenants')
+        .doc(tenantId)
+        .collection('usuarios')
+        .doc(uid);
+
+    // Evita rebuilds quando nada mudou.
+    return docRef.snapshots().map((s) => s.data()).distinct(mapEquals);
+  },
+);
+
+/// Guarda que exige o usuário pertencer ao tenant selecionado.
+/// Se [adminOnly] = true, só permite acesso para role == 'admin'.
+class MembershipGuard extends ConsumerWidget {
+  final Widget child;
+
+  /// Exigir permissão de admin?
+  final bool adminOnly;
+
+  /// Widgets opcionais
+  final Widget? loading;
+  final Widget? notMember;
+  final Widget? notAdmin;
+  final Widget? notLogged;
+
+  const MembershipGuard({
+    super.key,
+    required this.child,
+    this.adminOnly = false,
+    this.loading,
+    this.notMember,
+    this.notAdmin,
+    this.notLogged,
+  });
+
   @override
-  ConsumerState<TenantGate> createState() => _TenantGateState();
-}
-
-class _TenantGateState extends ConsumerState<TenantGate> {
-  late final Future<_Result> _future;
-
-  @override
-  void initState() {
-    super.initState();
-    _future = _load();
-  }
-
-  Future<_Result> _load() async {
-    final uid = FirebaseAuth.instance.currentUser!.uid;
-    try {
-      final q = await FirebaseFirestore.instance
-          .collectionGroup('usuarios')
-          .where('uid', isEqualTo: uid)
-          .get();
-
-      if (q.docs.isEmpty) return _Result.none();
-      if (q.docs.length == 1) {
-        final tenantId = q.docs.first.reference.parent.parent!.id;
-        return _Result.single(tenantId);
-      }
-      final items = q.docs.map((d) => d.reference.parent.parent!).toList();
-      return _Result.multi(items);
-    } on FirebaseException catch (e) {
-      if (e.code == 'permission-denied') return _Result.none();
-      rethrow;
+  Widget build(BuildContext context, WidgetRef ref) {
+    final user = FirebaseAuth.instance.currentUser;
+    if (user == null) {
+      return notLogged ??
+          const Scaffold(
+            body: Center(child: Text('Faça login para continuar.')),
+          );
     }
-  }
 
-  @override
-  Widget build(BuildContext context) {
-    return FutureBuilder<_Result>(
-      future: _future,
-      builder: (_, snap) {
-        if (snap.connectionState == ConnectionState.waiting) {
-          return const Scaffold(
-              body: Center(child: CircularProgressIndicator()));
-        }
-        if (snap.hasError) {
-          return const TenantJoinCreatePage();
-        }
-        final res = snap.data!;
-        if (res.kind == _Kind.none) return const TenantJoinCreatePage();
+    final tenantId = ref.watch(tenantIdProvider);
+    if (tenantId == null) {
+      // Logado, mas ainda não escolheu/entrou numa loja
+      return const TenantJoinCreatePage();
+    }
 
-        if (res.kind == _Kind.single) {
-          WidgetsBinding.instance.addPostFrameCallback((_) async {
-            await ref.read(tenantIdProvider.notifier).set(res.tenantId!);
-          });
-          return const SizedBox.shrink();
+    final asyncMembership = ref.watch(membershipProvider(tenantId));
+
+    return asyncMembership.when(
+      loading: () =>
+          loading ??
+          const Scaffold(body: Center(child: CircularProgressIndicator())),
+      error: (e, _) => Scaffold(
+          body: Center(child: Text('Erro ao carregar permissões: $e'))),
+      data: (m) {
+        if (m == null) {
+          // Não é membro da loja atual
+          return notMember ?? const TenantJoinCreatePage();
         }
 
-        final items = res.items!;
-        return Scaffold(
-          appBar: AppBar(title: const Text('Escolha a loja')),
-          body: ListView.builder(
-            itemCount: items.length,
-            itemBuilder: (_, i) =>
-                FutureBuilder<DocumentSnapshot<Map<String, dynamic>>>(
-              future: items[i].get(),
-              builder: (_, s) {
-                if (s.connectionState == ConnectionState.waiting) {
-                  return const ListTile(title: Text('Carregando...'));
-                }
-                final name =
-                    (s.data?.data()?['name'] ?? items[i].id).toString();
-                return ListTile(
-                  title: Text(name),
-                  onTap: () async {
-                    await ref.read(tenantIdProvider.notifier).set(items[i].id);
-                    if (context.mounted) {
-                      Navigator.of(context).pushReplacementNamed('/');
-                    }
-                  },
-                );
-              },
-            ),
-          ),
-        );
+        final role = (m['role'] ?? '').toString();
+        if (adminOnly && role != 'admin') {
+          return notAdmin ??
+              Scaffold(
+                appBar: AppBar(title: const Text('Permissão insuficiente')),
+                body: const Center(
+                  child:
+                      Text('Você não tem acesso de administrador nesta loja.'),
+                ),
+              );
+        }
+
+        return child;
       },
     );
   }
 }
 
-enum _Kind { none, single, multi }
+/// Atalho de uso comum: exige ser membro da loja atual.
+class RequireMember extends ConsumerWidget {
+  final Widget child;
+  const RequireMember({super.key, required this.child});
 
-class _Result {
-  final _Kind kind;
-  final String? tenantId;
-  final List<DocumentReference<Map<String, dynamic>>>? items;
-  _Result._(this.kind, this.tenantId, this.items);
-  factory _Result.none() => _Result._(_Kind.none, null, null);
-  factory _Result.single(String id) => _Result._(_Kind.single, id, null);
-  factory _Result.multi(List<DocumentReference<Map<String, dynamic>>> items) =>
-      _Result._(_Kind.multi, null, items);
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    return MembershipGuard(child: child);
+  }
+}
+
+/// Atalho de uso comum: exige ser ADMIN da loja atual.
+class RequireAdmin extends ConsumerWidget {
+  final Widget child;
+  const RequireAdmin({super.key, required this.child});
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    return MembershipGuard(adminOnly: true, child: child);
+  }
 }

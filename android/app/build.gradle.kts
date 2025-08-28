@@ -1,10 +1,12 @@
+// android/app/build.gradle.kts
 import java.util.Properties
 import java.io.FileInputStream
 
 plugins {
     id("com.android.application")
-    id("com.google.gms.google-services") // Firebase
+    id("com.google.gms.google-services")
     id("kotlin-android")
+    // O plugin do Flutter deve vir depois dos de Android/Kotlin
     id("dev.flutter.flutter-gradle-plugin")
 }
 
@@ -16,26 +18,28 @@ val keystoreProperties = Properties().apply {
 }
 
 android {
-    namespace = "com.example.smartstock"              // <- ajuste se mudar o pacote
+    namespace = "com.example.smartstock"  // altere se mudou o package
     compileSdk = flutter.compileSdkVersion
-    ndkVersion = flutter.ndkVersion
+    ndkVersion = "27.0.12077973"          // <-- corrige mismatch do NDK
 
     defaultConfig {
-        applicationId = "com.example.smartstock"      // <- ajuste se mudar o pacote
-        minSdk = 21                                   // Firebase requer 21+
+        applicationId = "com.example.smartstock" // altere se mudou
+        // EM KTS É ASSIM (atribuição). E garantimos no mínimo 23:
+        minSdk = maxOf(23, flutter.minSdkVersion)
         targetSdk = flutter.targetSdkVersion
         versionCode = flutter.versionCode
         versionName = flutter.versionName
-        multiDexEnabled = true                        // (fix) estava multiDexEnable
+
+        multiDexEnabled = true
         vectorDrawables.useSupportLibrary = true
     }
 
     compileOptions {
-        sourceCompatibility = JavaVersion.VERSION_17  // use 11 se seu ambiente pedir
+        sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
     }
     kotlinOptions {
-        jvmTarget = "17"                              // use "11" se necessário
+        jvmTarget = "17"
     }
 
     signingConfigs {
@@ -51,10 +55,10 @@ android {
 
     buildTypes {
         getByName("debug") {
-            // usa chave debug padrão
+            // chave debug padrão
         }
         getByName("release") {
-            // usa a release se existir key.properties; senão, assina com debug para facilitar o build local
+            // usa a release se existir; senão assina com debug pra facilitar build local
             signingConfig = if (keystorePropertiesFile.exists())
                 signingConfigs.getByName("release")
             else
@@ -71,7 +75,6 @@ android {
 
     packaging {
         resources {
-            // evita conflitos ocasionais de licenças
             excludes += "/META-INF/{AL2.0,LGPL2.1}"
         }
     }

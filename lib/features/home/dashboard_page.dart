@@ -4,10 +4,47 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import 'package:smartstock_flutter_only/features/auth/profile_page.dart';
 import 'package:smartstock_flutter_only/features/inbound/manual_entry_page.dart';
-// 👉 ajuste este import conforme seu arquivo:
+// Ajuste o import conforme seu caminho real:
 import '../sales/manual_sale_page.dart' show ManualSaleCatalogPage;
 
 import '../tenant/tenant_provider.dart';
+
+/// Helpers
+num _toNum(dynamic any, {num def = 0}) {
+  if (any is num) return any;
+  return num.tryParse('$any') ?? def;
+}
+
+String _fmtCurrency(num v) =>
+    'R\$ ${v.toStringAsFixed(2).replaceAll('.', ',')}';
+
+/// Produtos do tenant atual
+final _productsSnapProvider =
+    StreamProvider.autoDispose<QuerySnapshot<Map<String, dynamic>>>((ref) {
+  final tenantId = ref.watch(tenantIdProvider);
+  if (tenantId == null) return const Stream.empty();
+  return FirebaseFirestore.instance
+      .collection('tenants')
+      .doc(tenantId)
+      .collection('produtos')
+      .snapshots();
+});
+
+/// Vendas do mês corrente (filtra por createdAt >= 1º dia do mês)
+final _vendasMesSnapProvider =
+    StreamProvider.autoDispose<QuerySnapshot<Map<String, dynamic>>>((ref) {
+  final tenantId = ref.watch(tenantIdProvider);
+  if (tenantId == null) return const Stream.empty();
+  final now = DateTime.now();
+  final firstOfMonth = DateTime(now.year, now.month, 1);
+  return FirebaseFirestore.instance
+      .collection('tenants')
+      .doc(tenantId)
+      .collection('vendas')
+      .where('createdAt',
+          isGreaterThanOrEqualTo: Timestamp.fromDate(firstOfMonth))
+      .snapshots();
+});
 
 class DashboardPage extends ConsumerWidget {
   final VoidCallback onConsultarEstoque;
@@ -16,186 +53,172 @@ class DashboardPage extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final tenantId = ref.watch(tenantIdProvider);
-
     if (tenantId == null) {
       return const Center(
         child: Text('Nenhuma loja selecionada. Crie/entre em uma loja.'),
       );
     }
 
-    // Produtos da loja
-    final productsStream = FirebaseFirestore.instance
-        .collection('tenants')
-        .doc(tenantId)
-        .collection('produtos')
-        .snapshots();
+    final productsAsync = ref.watch(_productsSnapProvider);
+    final vendasAsync = ref.watch(_vendasMesSnapProvider);
 
-    // Vendas do mês corrente (somar campo "total")
-    final now = DateTime.now();
-    final firstOfMonth = DateTime(now.year, now.month, 1);
-    final vendasMesStream = FirebaseFirestore.instance
-        .collection('tenants')
-        .doc(tenantId)
-        .collection('vendas')
-        .where('createdAt',
-            isGreaterThanOrEqualTo: Timestamp.fromDate(firstOfMonth))
-        .snapshots();
+    // Métricas derivadas de produtos
+    num saldoEstoque = 0;
+    int totalProdutos = 0;
+    int semEstoque = 0;
+    int baixo = 0;
 
-    return StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
-      stream: productsStream,
-      builder: (context, prodSnap) {
-        // métricas baseadas nos produtos
-        num saldoEstoque = 0;
-        int totalProdutos = 0;
-        int semEstoque = 0;
-        int baixo = 0;
+    final prodDocs = productsAsync.valueOrNull?.docs ?? const [];
+    totalProdutos = prodDocs.length;
+    for (final d in prodDocs) {
+      final m = d.data();
+      final q =
+          _toNum(m['quantidade'] ?? m['Quantidade']).toInt().clamp(0, 1 << 31);
+      final v = _toNum(m['valor'] ?? m['preco'] ?? m['precoVenda'])
+          .toDouble()
+          .clamp(0, double.infinity);
+      final min = _toNum(m['estoqueMinimo'] ?? m['EstoqueMinimo'])
+          .toInt()
+          .clamp(0, 1 << 31);
 
-        if (prodSnap.hasData) {
-          totalProdutos = prodSnap.data!.docs.length;
-          for (final d in prodSnap.data!.docs) {
-            final m = d.data();
-            final qAny = m['quantidade'] ?? m['Quantidade'] ?? 0;
-            final vAny = m['valor'] ?? m['preco'] ?? m['precoVenda'] ?? 0;
-            final minAny = m['estoqueMinimo'] ?? m['EstoqueMinimo'] ?? 0;
+      saldoEstoque += q * v;
+      if (q <= 0) {
+        semEstoque++;
+      } else if (q <= min) {
+        baixo++;
+      }
+    }
 
-            final q = qAny is num ? qAny.toInt() : int.tryParse('$qAny') ?? 0;
-            final v =
-                vAny is num ? vAny.toDouble() : double.tryParse('$vAny') ?? 0.0;
-            final min =
-                minAny is num ? minAny.toInt() : int.tryParse('$minAny') ?? 0;
+    // Métrica de vendas do mês (soma do campo "total")
+    num vendasDoMes = 0;
+    final venDocs = vendasAsync.valueOrNull?.docs ?? const [];
+    for (final d in venDocs) {
+      vendasDoMes += _toNum(d.data()['total']).toDouble();
+    }
 
-            saldoEstoque += q * v;
-            if (q <= 0) {
-              semEstoque++;
-            } else if (q <= min) {
-              baixo++;
-            }
-          }
-        }
+    // Estado de carregamento/erro (mostra aviso, mas mantém UI com valores parciais)
+    final isLoading = productsAsync.isLoading || vendasAsync.isLoading;
+    final hasError = productsAsync.hasError || vendasAsync.hasError;
 
-        return StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
-          stream: vendasMesStream,
-          builder: (context, venSnap) {
-            num vendasDoMes = 0;
-            if (venSnap.hasData) {
-              for (final d in venSnap.data!.docs) {
-                final vAny = d.data()['total'] ?? 0;
-                final v = vAny is num
-                    ? vAny.toDouble()
-                    : double.tryParse('$vAny') ?? 0.0;
-                vendasDoMes += v;
-              }
-            }
+    return ListView(
+      padding: const EdgeInsets.all(16),
+      children: [
+        if (isLoading)
+          const Padding(
+            padding: EdgeInsets.only(bottom: 8),
+            child: LinearProgressIndicator(minHeight: 2),
+          ),
+        if (hasError)
+          Padding(
+            padding: const EdgeInsets.only(bottom: 8),
+            child: Text(
+              'Alguns dados não puderam ser carregados agora.',
+              style: TextStyle(color: Theme.of(context).colorScheme.error),
+            ),
+          ),
 
-            return ListView(
-              padding: const EdgeInsets.all(16),
-              children: [
-                // KPIs
-                Row(
-                  children: [
-                    Expanded(
-                        child: _BigStatCard(
-                            title: 'Vendas do mês',
-                            value: _fmtCurrency(vendasDoMes))),
-                    const SizedBox(width: 12),
-                    Expanded(
-                        child: _BigStatCard(
-                            title: 'Produtos', value: '$totalProdutos')),
-                  ],
-                ),
-                const SizedBox(height: 12),
-                Row(
-                  children: [
-                    Expanded(
-                        child: _TagCard(
-                      title: 'Sem estoque',
-                      value: '$semEstoque',
-                      color: Theme.of(context).colorScheme.errorContainer,
-                      onColor: Theme.of(context).colorScheme.onErrorContainer,
-                      icon: Icons.block,
-                    )),
-                    const SizedBox(width: 12),
-                    Expanded(
-                        child: _TagCard(
-                      title: 'Estoque baixo',
-                      value: '$baixo',
-                      color: Theme.of(context).colorScheme.secondaryContainer,
-                      onColor:
-                          Theme.of(context).colorScheme.onSecondaryContainer,
-                      icon: Icons.warning_amber,
-                    )),
-                  ],
-                ),
-                const SizedBox(height: 16),
+        // KPIs
+        Row(
+          children: [
+            Expanded(
+              child: _BigStatCard(
+                title: 'Vendas do mês',
+                value: _fmtCurrency(vendasDoMes),
+              ),
+            ),
+            const SizedBox(width: 12),
+            Expanded(
+              child: _BigStatCard(
+                title: 'Produtos',
+                value: '$totalProdutos',
+              ),
+            ),
+          ],
+        ),
+        const SizedBox(height: 12),
+        Row(
+          children: [
+            Expanded(
+              child: _TagCard(
+                title: 'Sem estoque',
+                value: '$semEstoque',
+                color: Theme.of(context).colorScheme.errorContainer,
+                onColor: Theme.of(context).colorScheme.onErrorContainer,
+                icon: Icons.block,
+              ),
+            ),
+            const SizedBox(width: 12),
+            Expanded(
+              child: _TagCard(
+                title: 'Estoque baixo',
+                value: '$baixo',
+                color: Theme.of(context).colorScheme.secondaryContainer,
+                onColor: Theme.of(context).colorScheme.onSecondaryContainer,
+                icon: Icons.warning_amber,
+              ),
+            ),
+          ],
+        ),
+        const SizedBox(height: 16),
 
-                // Grade de botões (menus)
-                GridView.count(
-                  physics: const NeverScrollableScrollPhysics(),
-                  crossAxisCount: 2,
-                  shrinkWrap: true,
-                  crossAxisSpacing: 12,
-                  mainAxisSpacing: 12,
-                  childAspectRatio: 2.6,
-                  children: [
-                    _MenuPill(
-                      icon: Icons.point_of_sale,
-                      label: 'Vender',
-                      onTap: () {
-                        Navigator.of(context).push(
-                          MaterialPageRoute(
-                              builder: (_) => const ManualSaleCatalogPage()),
-                        );
-                      },
-                    ),
-                    _MenuPill(
-                      icon: Icons.receipt_long,
-                      label: 'Relatórios',
-                      onTap: () {
-                        ScaffoldMessenger.of(context).showSnackBar(
-                          const SnackBar(
-                              content: Text('Relatórios em breve 😊')),
-                        );
-                      },
-                    ),
-                    _MenuPill(
-                      icon: Icons.inventory_rounded,
-                      label: 'Entrada manual',
-                      onTap: () {
-                        Navigator.of(context).push(
-                          MaterialPageRoute(
-                              builder: (_) => const ManualEntryPage()),
-                        );
-                      },
-                    ),
-                    _MenuPill(
-                      icon: Icons.settings_outlined,
-                      label: 'Configurações',
-                      onTap: () {
-                        Navigator.of(context).push(
-                          MaterialPageRoute(
-                              builder: (_) => const ProfilePage()),
-                        );
-                      },
-                    ),
-                  ],
-                ),
-                const SizedBox(height: 16),
+        // Grade de botões (menus)
+        GridView.count(
+          physics: const NeverScrollableScrollPhysics(),
+          crossAxisCount: 2,
+          shrinkWrap: true,
+          crossAxisSpacing: 12,
+          mainAxisSpacing: 12,
+          childAspectRatio: 2.6,
+          children: [
+            _MenuPill(
+              icon: Icons.point_of_sale,
+              label: 'Vender',
+              onTap: () {
+                Navigator.of(context).push(
+                  MaterialPageRoute(
+                      builder: (_) => const ManualSaleCatalogPage()),
+                );
+              },
+            ),
+            _MenuPill(
+              icon: Icons.receipt_long,
+              label: 'Relatórios',
+              onTap: () {
+                ScaffoldMessenger.of(context).showSnackBar(
+                  const SnackBar(content: Text('Relatórios em breve 😊')),
+                );
+              },
+            ),
+            _MenuPill(
+              icon: Icons.inventory_rounded,
+              label: 'Entrada manual',
+              onTap: () {
+                Navigator.of(context).push(
+                  MaterialPageRoute(builder: (_) => const ManualEntryPage()),
+                );
+              },
+            ),
+            _MenuPill(
+              icon: Icons.settings_outlined,
+              label: 'Configurações',
+              onTap: () {
+                Navigator.of(context).push(
+                  MaterialPageRoute(builder: (_) => const ProfilePage()),
+                );
+              },
+            ),
+          ],
+        ),
+        const SizedBox(height: 16),
 
-                // Card — Saldo em estoque + botão verde
-                _StockCard(
-                  totalText: _fmtCurrency(saldoEstoque),
-                  onConsultar: onConsultarEstoque,
-                ),
-              ],
-            );
-          },
-        );
-      },
+        // Card — Saldo em estoque + botão verde
+        _StockCard(
+          totalText: _fmtCurrency(saldoEstoque),
+          onConsultar: onConsultarEstoque,
+        ),
+      ],
     );
   }
-
-  static String _fmtCurrency(num v) =>
-      'R\$ ${v.toStringAsFixed(2).replaceAll('.', ',')}';
 }
 
 class _BigStatCard extends StatelessWidget {

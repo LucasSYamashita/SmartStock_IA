@@ -2,37 +2,95 @@ import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+
 import '../../features/tenant/tenant_provider.dart';
 import '../../features/tenant/tenant_join_create_page.dart';
 
+/// Provider que observa o documento de membership do usuário na loja.
+/// Retorna o Map com os campos do membership ou null se não existir.
+final membershipProvider = StreamProvider.family<Map<String, dynamic>?, String>(
+  (ref, tenantId) {
+    final uid = FirebaseAuth.instance.currentUser?.uid;
+    if (uid == null) return const Stream.empty();
+    final docRef = FirebaseFirestore.instance
+        .collection('tenants')
+        .doc(tenantId)
+        .collection('usuarios')
+        .doc(uid);
+
+    return docRef.snapshots().map((snap) => snap.data());
+  },
+);
+
+/// Guarda de rota/área que exige o usuário pertencer ao tenant selecionado.
+/// Se [adminOnly] = true, só permite acesso para role == 'admin'.
 class MembershipGuard extends ConsumerWidget {
   final Widget child;
-  const MembershipGuard({super.key, required this.child});
+
+  /// Exigir permissão de admin?
+  final bool adminOnly;
+
+  /// Widgets opcionais de personalização de estados
+  final Widget? loading;
+  final Widget? notMember;
+  final Widget? notAdmin;
+  final Widget? notLogged;
+
+  const MembershipGuard({
+    super.key,
+    required this.child,
+    this.adminOnly = false,
+    this.loading,
+    this.notMember,
+    this.notAdmin,
+    this.notLogged,
+  });
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final tenantId = ref.watch(tenantIdProvider);
-    final uid = FirebaseAuth.instance.currentUser?.uid;
+    final user = FirebaseAuth.instance.currentUser;
+    if (user == null) {
+      return notLogged ??
+          const Scaffold(
+            body: Center(child: Text('Faça login para continuar.')),
+          );
+    }
 
-    if (tenantId == null || uid == null) {
+    final tenantId = ref.watch(tenantIdProvider);
+    if (tenantId == null) {
+      // Usuário logado mas ainda não escolheu/entrou numa loja
       return const TenantJoinCreatePage();
     }
 
-    return StreamBuilder<DocumentSnapshot<Map<String, dynamic>>>(
-      stream: FirebaseFirestore.instance
-          .collection('tenants')
-          .doc(tenantId)
-          .collection('usuarios')
-          .doc(uid)
-          .snapshots(),
-      builder: (context, snap) {
-        if (snap.connectionState == ConnectionState.waiting) {
-          return const Center(child: CircularProgressIndicator());
+    final asyncMembership = ref.watch(membershipProvider(tenantId));
+
+    return asyncMembership.when(
+      loading: () =>
+          loading ??
+          const Scaffold(body: Center(child: CircularProgressIndicator())),
+      error: (e, _) => Scaffold(
+        body: Center(child: Text('Erro ao carregar permissões: $e')),
+      ),
+      data: (m) {
+        // Não é membro da loja atual -> direciona para entrar/criar
+        if (m == null) {
+          return notMember ?? const TenantJoinCreatePage();
         }
-        if (!snap.hasData || !snap.data!.exists) {
-          // não é membro → ir para a tela de entrar/criar loja
-          return const TenantJoinCreatePage();
+
+        // Checagem de admin, se exigido
+        final role = (m['role'] ?? '').toString();
+        if (adminOnly && role != 'admin') {
+          return notAdmin ??
+              Scaffold(
+                appBar: AppBar(title: const Text('Permissão insuficiente')),
+                body: const Center(
+                  child:
+                      Text('Você não tem acesso de administrador nesta loja.'),
+                ),
+              );
         }
+
+        // Acesso liberado
         return child;
       },
     );

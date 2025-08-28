@@ -30,12 +30,33 @@ class _HomePageState extends ConsumerState<HomePage> {
           orElse: () => false,
         );
 
-    final pages = [
+    // use IndexedStack para manter o estado das telas
+    final List<Widget> pages = [
       DashboardPage(onConsultarEstoque: () => setState(() => index = 1)),
       const ProductListPage(),
       const ChatPage(),
       const ProfilePage(),
     ];
+
+    // FAB por aba
+    Widget? fab;
+    if (index == 0) {
+      fab = FloatingActionButton.extended(
+        icon: const Icon(Icons.point_of_sale),
+        label: const Text('Vender'),
+        onPressed: () {
+          Navigator.of(context).push(
+            MaterialPageRoute(builder: (_) => const ManualSaleCatalogPage()),
+          );
+        },
+      );
+    } else if (index == 1 && isAdmin) {
+      fab = FloatingActionButton(
+        tooltip: 'Novo produto',
+        onPressed: () => _addProduct(context),
+        child: const Icon(Icons.add),
+      );
+    }
 
     return Scaffold(
       appBar: AppBar(
@@ -63,7 +84,7 @@ class _HomePageState extends ConsumerState<HomePage> {
           ),
         ],
       ),
-      body: pages[index],
+      body: IndexedStack(index: index, children: pages),
       bottomNavigationBar: NavigationBar(
         selectedIndex: index,
         onDestinationSelected: (i) => setState(() => index = i),
@@ -90,26 +111,7 @@ class _HomePageState extends ConsumerState<HomePage> {
           ),
         ],
       ),
-      floatingActionButton: switch (index) {
-        0 => FloatingActionButton.extended(
-            icon: const Icon(Icons.point_of_sale),
-            label: const Text('Vender'),
-            onPressed: () {
-              Navigator.of(context).push(
-                MaterialPageRoute(
-                    builder: (_) => const ManualSaleCatalogPage()),
-              );
-            },
-          ),
-        1 => isAdmin
-            ? FloatingActionButton(
-                tooltip: 'Novo produto',
-                onPressed: () => _addProduct(context),
-                child: const Icon(Icons.add),
-              )
-            : null,
-        _ => null,
-      },
+      floatingActionButton: fab,
     );
   }
 
@@ -117,61 +119,99 @@ class _HomePageState extends ConsumerState<HomePage> {
     final nameCtrl = TextEditingController();
     final qtdCtrl = TextEditingController(text: '0');
     final minCtrl = TextEditingController(text: '0');
+    final priceCtrl = TextEditingController(text: '0');
+    final brandCtrl = TextEditingController();
 
     await showDialog(
       context: context,
       builder: (_) => AlertDialog(
         title: const Text('Novo produto'),
         content: SizedBox(
-          width: 400,
+          width: 420,
           child: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
               TextField(
-                  controller: nameCtrl,
-                  decoration: const InputDecoration(labelText: 'Nome')),
+                controller: nameCtrl,
+                decoration: const InputDecoration(labelText: 'Nome'),
+                textInputAction: TextInputAction.next,
+              ),
               const SizedBox(height: 8),
               TextField(
-                  controller: qtdCtrl,
-                  decoration: const InputDecoration(labelText: 'Quantidade'),
-                  keyboardType: TextInputType.number),
+                controller: brandCtrl,
+                decoration:
+                    const InputDecoration(labelText: 'Marca (opcional)'),
+                textInputAction: TextInputAction.next,
+              ),
               const SizedBox(height: 8),
               TextField(
-                  controller: minCtrl,
-                  decoration:
-                      const InputDecoration(labelText: 'Estoque mínimo'),
-                  keyboardType: TextInputType.number),
+                controller: qtdCtrl,
+                decoration: const InputDecoration(labelText: 'Quantidade'),
+                keyboardType: TextInputType.number,
+                textInputAction: TextInputAction.next,
+              ),
+              const SizedBox(height: 8),
+              TextField(
+                controller: minCtrl,
+                decoration: const InputDecoration(labelText: 'Estoque mínimo'),
+                keyboardType: TextInputType.number,
+                textInputAction: TextInputAction.next,
+              ),
+              const SizedBox(height: 8),
+              TextField(
+                controller: priceCtrl,
+                decoration:
+                    const InputDecoration(labelText: 'Preço de venda (R\$)'),
+                keyboardType:
+                    const TextInputType.numberWithOptions(decimal: true),
+              ),
             ],
           ),
         ),
         actions: [
           TextButton(
-              onPressed: () => Navigator.pop(context),
-              child: const Text('Cancelar')),
+            onPressed: () => Navigator.pop(context),
+            child: const Text('Cancelar'),
+          ),
           FilledButton(
             onPressed: () async {
               final tenantId = ref.read(tenantIdProvider);
               if (tenantId == null) return;
 
               final nome = nameCtrl.text.trim();
+              final marca = brandCtrl.text.trim();
               final quantidade = int.tryParse(qtdCtrl.text.trim()) ?? 0;
               final minimo = int.tryParse(minCtrl.text.trim()) ?? 0;
+              final preco = double.tryParse(
+                    priceCtrl.text.trim().replaceAll(',', '.'),
+                  ) ??
+                  0.0;
+
               if (nome.isEmpty) return;
+
+              final data = <String, dynamic>{
+                'nome': nome,
+                'nomeLower': nome.toLowerCase(),
+                'quantidade': quantidade,
+                'estoqueMinimo': minimo,
+                'precoVenda': preco, // campo padrão de preço
+                'updatedAt': FieldValue.serverTimestamp(),
+                'createdAt': FieldValue.serverTimestamp(),
+              };
+              if (marca.isNotEmpty) data['marca'] = marca;
 
               await FirebaseFirestore.instance
                   .collection('tenants')
                   .doc(tenantId)
                   .collection('produtos')
-                  .add({
-                'nome': nome,
-                'nomeLower': nome.toLowerCase(),
-                'quantidade': quantidade,
-                'estoqueMinimo': minimo,
-                'createdAt': FieldValue.serverTimestamp(),
-                'updatedAt': FieldValue.serverTimestamp(),
-              });
+                  .add(data);
 
-              if (context.mounted) Navigator.pop(context);
+              if (context.mounted) {
+                Navigator.pop(context);
+                ScaffoldMessenger.of(context).showSnackBar(
+                  const SnackBar(content: Text('Produto criado.')),
+                );
+              }
             },
             child: const Text('Salvar'),
           ),

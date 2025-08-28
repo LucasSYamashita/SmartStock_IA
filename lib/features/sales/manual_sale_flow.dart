@@ -9,6 +9,13 @@ import '../tenant/tenant_provider.dart';
 import '../../data/datasources/firestore_movements.dart';
 import 'cart_state.dart';
 
+/// Util formatação de moeda (evita -0,00)
+String _fmt(num v) {
+  final dv = v.toDouble();
+  final z = dv.abs() < 0.0005 ? 0.0 : dv;
+  return 'R\$ ${z.toStringAsFixed(2).replaceAll('.', ',')}';
+}
+
 /// Stream de produtos da loja atual
 final _productsProvider =
     StreamProvider<QuerySnapshot<Map<String, dynamic>>>((ref) {
@@ -22,7 +29,7 @@ final _productsProvider =
       .snapshots();
 });
 
-/// Página 1: catálogo com cards e badge do carrinho
+/// Página 1: catálogo com cards, stepper e resumo no rodapé
 class ManualSaleCatalogPage extends ConsumerStatefulWidget {
   const ManualSaleCatalogPage({super.key});
   @override
@@ -36,27 +43,30 @@ class _ManualSaleCatalogPageState extends ConsumerState<ManualSaleCatalogPage> {
   @override
   Widget build(BuildContext context) {
     final async = ref.watch(_productsProvider);
-    final cartCount = ref.watch(cartCountProvider);
+    final uniqueCount = ref.watch(cartCountProvider);
+    final subtotal = ref.watch(cartSubtotalProvider);
+    final totalQty = ref.watch(cartTotalQtyProvider);
 
     return Scaffold(
       appBar: AppBar(
         title: const Text('Vender'),
         actions: [
-          // ícone do carrinho com badge
+          // Badge do carrinho no AppBar
           Stack(
             alignment: Alignment.center,
             children: [
               IconButton(
                 icon: const Icon(Icons.shopping_cart_outlined),
-                onPressed: cartCount == 0
+                onPressed: uniqueCount == 0
                     ? null
                     : () {
-                        Navigator.of(context).push(MaterialPageRoute(
-                          builder: (_) => const ManualSaleCheckoutPage(),
-                        ));
+                        Navigator.of(context).push(
+                          MaterialPageRoute(
+                              builder: (_) => const ManualSaleCheckoutPage()),
+                        );
                       },
               ),
-              if (cartCount > 0)
+              if (uniqueCount > 0)
                 Positioned(
                   right: 10,
                   top: 10,
@@ -68,7 +78,7 @@ class _ManualSaleCatalogPageState extends ConsumerState<ManualSaleCatalogPage> {
                       borderRadius: BorderRadius.circular(12),
                     ),
                     child: Text(
-                      '$cartCount',
+                      '$uniqueCount',
                       style: const TextStyle(
                           color: Colors.white, fontSize: 11, height: 1),
                     ),
@@ -115,11 +125,22 @@ class _ManualSaleCatalogPageState extends ConsumerState<ManualSaleCatalogPage> {
                   itemBuilder: (_, i) {
                     final m = docs[i].data();
                     final id = docs[i].id;
+
+                    // Padronização dos campos
                     final nome = (m['nome'] ?? '').toString();
-                    final qAny = m['quantidade'] ?? 0;
-                    final qtd =
+                    final marca = (m['marca'] ?? '').toString();
+
+                    final qAny = m['quantidade'] ?? m['Quantidade'] ?? 0;
+                    final estoque =
                         qAny is num ? qAny.toInt() : int.tryParse('$qAny') ?? 0;
-                    final priceAny = m['precoVenda'] ?? m['valor'] ?? 0.0;
+
+                    final minAny =
+                        m['estoqueMinimo'] ?? m['EstoqueMinimo'] ?? 0;
+                    final minimo = minAny is num
+                        ? minAny.toInt()
+                        : int.tryParse('$minAny') ?? 0;
+
+                    final priceAny = m['valor'] ?? m['precoVenda'] ?? 0.0;
                     final price = priceAny is num
                         ? priceAny.toDouble()
                         : double.tryParse('$priceAny') ?? 0.0;
@@ -127,18 +148,32 @@ class _ManualSaleCatalogPageState extends ConsumerState<ManualSaleCatalogPage> {
                     return _ProductCard(
                       productId: id,
                       nome: nome,
-                      estoque: qtd,
+                      marca: marca,
+                      estoque: estoque,
+                      minimo: minimo,
                       price: price,
-                      onAdd: () {
-                        ref.read(cartProvider.notifier).addOrInc(CartItem(
-                              productId: id,
-                              nome: nome,
-                              quantity: 1,
-                              unitPrice: price,
-                            ));
+                      onAdd: (qtd) {
+                        if (qtd <= 0) return;
+                        if (estoque > 0 && qtd > estoque) {
+                          ScaffoldMessenger.of(context).showSnackBar(
+                            const SnackBar(
+                                content: Text('Quantidade acima do estoque.')),
+                          );
+                          return;
+                        }
+                        ref.read(cartProvider.notifier).addOrInc(
+                              CartItem(
+                                productId: id,
+                                nome: nome,
+                                quantity: qtd,
+                                unitPrice: price,
+                              ),
+                              by: qtd,
+                            );
                         ScaffoldMessenger.of(context).showSnackBar(
                           SnackBar(
-                              content: Text('"$nome" adicionado ao carrinho.')),
+                              content: Text(
+                                  '$qtd × "$nome" adicionado ao carrinho.')),
                         );
                       },
                     );
@@ -151,52 +186,169 @@ class _ManualSaleCatalogPageState extends ConsumerState<ManualSaleCatalogPage> {
           ),
         ],
       ),
-      floatingActionButton: FloatingActionButton.extended(
-        onPressed: cartCount == 0
-            ? null
-            : () {
-                Navigator.of(context).push(
-                  MaterialPageRoute(
-                      builder: (_) => const ManualSaleCheckoutPage()),
-                );
-              },
-        icon: const Icon(Icons.point_of_sale),
-        label: const Text('Fechar venda'),
+
+      // Resumo no rodapé
+      bottomNavigationBar: SafeArea(
+        child: Container(
+          padding: const EdgeInsets.fromLTRB(16, 10, 16, 10),
+          decoration: BoxDecoration(
+            color: Theme.of(context).colorScheme.surface,
+            border:
+                Border(top: BorderSide(color: Theme.of(context).dividerColor)),
+          ),
+          child: Row(
+            children: [
+              Expanded(
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text('Itens: $uniqueCount  •  Unidades: $totalQty'),
+                    Text('Subtotal: ${_fmt(subtotal)}',
+                        style: Theme.of(context).textTheme.titleMedium),
+                  ],
+                ),
+              ),
+              FilledButton.icon(
+                onPressed: uniqueCount == 0
+                    ? null
+                    : () {
+                        Navigator.of(context).push(
+                          MaterialPageRoute(
+                              builder: (_) => const ManualSaleCheckoutPage()),
+                        );
+                      },
+                icon: const Icon(Icons.point_of_sale),
+                label: const Text('Fechar venda'),
+              ),
+            ],
+          ),
+        ),
       ),
     );
   }
 }
 
-class _ProductCard extends StatelessWidget {
+/// Card com stepper de quantidade e status de estoque (“S/E”, “Baixo”)
+class _ProductCard extends StatefulWidget {
   final String productId;
   final String nome;
+  final String marca;
   final int estoque;
+  final int minimo;
   final double price;
-  final VoidCallback onAdd;
+  final void Function(int qtd) onAdd;
+
   const _ProductCard({
     required this.productId,
     required this.nome,
+    required this.marca,
     required this.estoque,
+    required this.minimo,
     required this.price,
     required this.onAdd,
   });
 
-  String _fmt(num v) => 'R\$ ${v.toStringAsFixed(2).replaceAll('.', ',')}';
+  @override
+  State<_ProductCard> createState() => _ProductCardState();
+}
+
+class _ProductCardState extends State<_ProductCard> {
+  int qtd = 1;
 
   @override
   Widget build(BuildContext context) {
+    final se = widget.estoque == 0;
+    final baixo = !se && widget.estoque <= widget.minimo;
+
     return Card(
-      child: ListTile(
-        leading: CircleAvatar(
-            child: Text(nome.isNotEmpty ? nome[0].toUpperCase() : '?')),
-        title: Text(nome),
-        subtitle: Text('Estoque: $estoque  •  Preço: ${_fmt(price)}'),
-        trailing: FilledButton.tonalIcon(
-          onPressed: onAdd,
-          icon: const Icon(Icons.add_shopping_cart),
-          label: const Text('Adicionar'),
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+        child: Row(
+          children: [
+            CircleAvatar(
+              child: Text(
+                  widget.nome.isNotEmpty ? widget.nome[0].toUpperCase() : '?'),
+            ),
+            const SizedBox(width: 12),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(widget.nome,
+                      style: Theme.of(context).textTheme.titleMedium),
+                  const SizedBox(height: 2),
+                  if (widget.marca.isNotEmpty)
+                    Text(widget.marca,
+                        style: Theme.of(context).textTheme.bodySmall),
+                  const SizedBox(height: 4),
+                  Row(
+                    children: [
+                      Text(
+                        'Estoque: ${widget.estoque}  •  Preço: ${_fmt(widget.price)}',
+                        style: Theme.of(context).textTheme.bodySmall,
+                      ),
+                      const SizedBox(width: 8),
+                      if (se)
+                        const Chip(
+                          padding: EdgeInsets.zero,
+                          visualDensity: VisualDensity.compact,
+                          label: Text('S/E'),
+                          avatar: Icon(Icons.close, size: 16),
+                        )
+                      else if (baixo)
+                        const Chip(
+                          padding: EdgeInsets.zero,
+                          visualDensity: VisualDensity.compact,
+                          label: Text('Baixo'),
+                          avatar: Icon(Icons.warning_amber, size: 16),
+                        ),
+                    ],
+                  ),
+                ],
+              ),
+            ),
+            _QtyStepper(
+              value: qtd,
+              onChanged: (v) => setState(() => qtd = v),
+              max: widget.estoque > 0 ? widget.estoque : 1,
+            ),
+            const SizedBox(width: 8),
+            FilledButton.tonalIcon(
+              onPressed: se ? null : () => widget.onAdd(qtd),
+              icon: const Icon(Icons.add_shopping_cart),
+              label: const Text('Adicionar'),
+            ),
+          ],
         ),
       ),
+    );
+  }
+}
+
+class _QtyStepper extends StatelessWidget {
+  final int value;
+  final ValueChanged<int> onChanged;
+  final int? max;
+  const _QtyStepper({required this.value, required this.onChanged, this.max});
+
+  @override
+  Widget build(BuildContext context) {
+    return Row(
+      children: [
+        IconButton(
+          visualDensity: VisualDensity.compact,
+          onPressed: value > 1 ? () => onChanged(value - 1) : null,
+          icon: const Icon(Icons.remove),
+        ),
+        Text('$value', style: Theme.of(context).textTheme.titleMedium),
+        IconButton(
+          visualDensity: VisualDensity.compact,
+          onPressed:
+              max == null || value < max! ? () => onChanged(value + 1) : null,
+          icon: const Icon(Icons.add),
+        ),
+      ],
     );
   }
 }
@@ -220,7 +372,11 @@ class _ManualSaleCheckoutPageState
   bool saving = false;
   String? err;
 
-  String _fmt(num v) => 'R\$ ${v.toStringAsFixed(2).replaceAll('.', ',')}';
+  @override
+  void dispose() {
+    _discountCtrl.dispose();
+    super.dispose();
+  }
 
   double _parseDiscount() {
     final raw = _discountCtrl.text.trim().replaceAll(',', '.');
@@ -228,19 +384,14 @@ class _ManualSaleCheckoutPageState
   }
 
   @override
-  void dispose() {
-    _discountCtrl.dispose();
-    super.dispose();
-  }
-
-  @override
   Widget build(BuildContext context) {
     final items = ref.watch(cartProvider);
     final subtotal = ref.watch(cartSubtotalProvider);
     final d = _parseDiscount();
-    final desconto = percent ? subtotal * (d / 100.0) : d;
-    // ✅ forçar double para evitar erro de tipo ao chamar _finalizar
-    final total = (subtotal - desconto).clamp(0, double.infinity).toDouble();
+    final descontoBruto = percent ? subtotal * (d / 100.0) : d;
+    final desconto = descontoBruto.clamp(0.0, subtotal).toDouble();
+    final double total =
+        (subtotal - desconto).clamp(0.0, double.infinity).toDouble();
 
     return Scaffold(
       appBar: AppBar(title: const Text('Pagamento & desconto')),
@@ -271,9 +422,13 @@ class _ManualSaleCheckoutPageState
                   Expanded(
                     child: TextField(
                       controller: _discountCtrl,
-                      keyboardType: TextInputType.number,
+                      keyboardType:
+                          const TextInputType.numberWithOptions(decimal: true),
+                      inputFormatters: [
+                        // permite apenas dígitos, vírgula e ponto
+                        FilteringTextInputFormatter.allow(RegExp(r'[0-9,\.]')),
+                      ],
                       decoration: InputDecoration(
-                        // ✅ corrigido para "R$"
                         labelText: percent ? 'Desconto (%)' : 'Desconto (R\$)',
                       ),
                       onChanged: (_) => setState(() {}),
@@ -282,7 +437,6 @@ class _ManualSaleCheckoutPageState
                   const SizedBox(width: 12),
                   SegmentedButton<bool>(
                     segments: const [
-                      // ✅ corrigido para "R$"
                       ButtonSegment(value: false, label: Text('R\$')),
                       ButtonSegment(value: true, label: Text('%')),
                     ],
@@ -343,8 +497,7 @@ class _ManualSaleCheckoutPageState
                   : () => _finalizar(
                         total,
                         desconto,
-                        // snapshot para o recibo antes de limpar o carrinho
-                        List<CartItem>.from(items),
+                        List<CartItem>.from(items), // snapshot p/ recibo
                       ),
               child: Text(
                 saving ? 'Finalizando...' : 'Finalizar venda • ${_fmt(total)}',
@@ -356,7 +509,6 @@ class _ManualSaleCheckoutPageState
     );
   }
 
-  // ✅ recebe os itens (snapshot), assim o recibo não fica vazio
   Future<void> _finalizar(
     double total,
     double desconto,
@@ -373,7 +525,9 @@ class _ManualSaleCheckoutPageState
       final db = FirebaseFirestore.instance;
       final uid = FirebaseAuth.instance.currentUser!.uid;
 
-      // 1) registra uma venda agregada (para relatórios futuros)
+      final subtotal = itemsSnapshot.fold<double>(0.0, (s, it) => s + it.total);
+
+      // 1) registra venda
       final vendaRef = await db
           .collection('tenants')
           .doc(tenantId)
@@ -389,8 +543,7 @@ class _ManualSaleCheckoutPageState
               'total': it.total,
             }
         ],
-        'subtotal': itemsSnapshot.fold<double>(
-            0.0, (s, it) => s + it.total), // subtotal consistente
+        'subtotal': subtotal,
         'desconto': desconto,
         'total': total,
         'pagamento': method,
@@ -398,7 +551,7 @@ class _ManualSaleCheckoutPageState
         'createdAt': FieldValue.serverTimestamp(),
       });
 
-      // 2) aplica movimentações (baixa do estoque)
+      // 2) baixa do estoque
       final mov = FirestoreMovements(db, tenantId);
       for (final it in itemsSnapshot) {
         await mov.applyMovement(
@@ -412,10 +565,10 @@ class _ManualSaleCheckoutPageState
         );
       }
 
-      // 3) zera carrinho
+      // 3) limpa carrinho
       ref.read(cartProvider.notifier).clear();
 
-      // 4) gerar/compartilhar recibo (com snapshot dos itens)
+      // 4) recibo
       await _compartilharRecibo(
         vendaRef.id,
         total,
@@ -439,7 +592,6 @@ class _ManualSaleCheckoutPageState
     }
   }
 
-  // ✅ agora recebe os itens e o método de pagamento explicitamente
   Future<void> _compartilharRecibo(
     String vendaId,
     double total,
@@ -448,8 +600,6 @@ class _ManualSaleCheckoutPageState
     String paymentMethod,
     String? tenantId,
   ) async {
-    final subtotal = items.fold<double>(0.0, (s, it) => s + it.total);
-
     // pegar nome da loja (se existir)
     String loja = tenantId ?? 'SmartStock';
     try {
@@ -462,6 +612,7 @@ class _ManualSaleCheckoutPageState
       }
     } catch (_) {}
 
+    final subtotal = items.fold<double>(0.0, (s, it) => s + it.total);
     final buffer = StringBuffer()
       ..writeln('Recibo – $loja')
       ..writeln('Venda: $vendaId')
@@ -469,13 +620,13 @@ class _ManualSaleCheckoutPageState
 
     for (final it in items) {
       buffer.writeln(
-          '${it.quantity}× ${it.nome} @ R\$ ${it.unitPrice.toStringAsFixed(2)} = R\$ ${it.total.toStringAsFixed(2)}');
+          '${it.quantity}× ${it.nome} @ ${_fmt(it.unitPrice)} = ${_fmt(it.total)}');
     }
     buffer
       ..writeln('-----------------------------')
-      ..writeln('Subtotal: R\$ ${subtotal.toStringAsFixed(2)}')
-      ..writeln('Desconto: R\$ ${desconto.toStringAsFixed(2)}')
-      ..writeln('Total:    R\$ ${total.toStringAsFixed(2)}')
+      ..writeln('Subtotal: ${_fmt(subtotal)}')
+      ..writeln('Desconto: ${_fmt(desconto)}')
+      ..writeln('Total:    ${_fmt(total)}')
       ..writeln('Pagamento: ${paymentMethod.toUpperCase()}');
 
     final text = buffer.toString();

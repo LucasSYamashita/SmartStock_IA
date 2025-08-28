@@ -81,19 +81,32 @@ class _ManualSaleCatalogPageState extends ConsumerState<ManualSaleCatalogPage> {
                   itemBuilder: (_, i) {
                     final m = docs[i].data();
                     final id = docs[i].id;
+
+                    // ---------- PADRONIZAÇÃO DE CAMPOS ----------
                     final nome = (m['nome'] ?? '').toString();
-                    final qAny = m['quantidade'] ?? 0;
+                    final marca = (m['marca'] ?? '').toString();
+                    final qAny = m['quantidade'] ?? m['Quantidade'] ?? 0;
+                    final minAny =
+                        m['estoqueMinimo'] ?? m['EstoqueMinimo'] ?? 0;
                     final estoque =
                         qAny is num ? qAny.toInt() : int.tryParse('$qAny') ?? 0;
+                    final minimo = minAny is num
+                        ? minAny.toInt()
+                        : int.tryParse('$minAny') ?? 0;
+
+                    // preço unitário: preferimos `valor` (padrão), caindo para `precoVenda` se existir
                     final priceAny = m['valor'] ?? m['precoVenda'] ?? 0.0;
                     final price = priceAny is num
                         ? priceAny.toDouble()
                         : double.tryParse('$priceAny') ?? 0.0;
+                    // -------------------------------------------
 
                     return _ProductCard(
                       productId: id,
                       nome: nome,
+                      marca: marca,
                       estoque: estoque,
+                      minimo: minimo,
                       price: price,
                       onAdd: (qtd) {
                         if (qtd <= 0) return;
@@ -165,18 +178,22 @@ class _ManualSaleCatalogPageState extends ConsumerState<ManualSaleCatalogPage> {
   }
 }
 
-/// Card com **stepper** de quantidade
+/// Card com **stepper** de quantidade + status de estoque (“S/E”, “Baixo”, “OK”)
 class _ProductCard extends StatefulWidget {
   final String productId;
   final String nome;
+  final String marca;
   final int estoque;
+  final int minimo;
   final double price;
   final void Function(int qtd) onAdd;
 
   const _ProductCard({
     required this.productId,
     required this.nome,
+    required this.marca,
     required this.estoque,
+    required this.minimo,
     required this.price,
     required this.onAdd,
   });
@@ -190,7 +207,12 @@ class _ProductCardState extends State<_ProductCard> {
 
   @override
   Widget build(BuildContext context) {
-    final low = widget.estoque <= 0;
+    // regra solicitada:
+    // - estoque == 0  -> “S/E”
+    // - estoque > 0 e <= mínimo -> “Baixo”
+    // - caso contrário -> “OK” (sem chip)
+    final se = widget.estoque == 0;
+    final baixo = !se && widget.estoque <= widget.minimo;
 
     return Card(
       child: Padding(
@@ -198,9 +220,9 @@ class _ProductCardState extends State<_ProductCard> {
         child: Row(
           children: [
             CircleAvatar(
-                child: Text(widget.nome.isNotEmpty
-                    ? widget.nome[0].toUpperCase()
-                    : '?')),
+              child: Text(
+                  widget.nome.isNotEmpty ? widget.nome[0].toUpperCase() : '?'),
+            ),
             const SizedBox(width: 12),
             Expanded(
               child: Column(
@@ -208,23 +230,44 @@ class _ProductCardState extends State<_ProductCard> {
                 children: [
                   Text(widget.nome,
                       style: Theme.of(context).textTheme.titleMedium),
+                  const SizedBox(height: 2),
+                  if (widget.marca.isNotEmpty)
+                    Text(widget.marca,
+                        style: Theme.of(context).textTheme.bodySmall),
                   const SizedBox(height: 4),
-                  Text(
-                      'Estoque: ${widget.estoque}  •  Preço: ${_fmt(widget.price)}',
-                      style: Theme.of(context).textTheme.bodySmall),
+                  Row(
+                    children: [
+                      Text(
+                          'Estoque: ${widget.estoque}  •  Preço: ${_fmt(widget.price)}',
+                          style: Theme.of(context).textTheme.bodySmall),
+                      const SizedBox(width: 8),
+                      if (se)
+                        const Chip(
+                          padding: EdgeInsets.zero,
+                          visualDensity: VisualDensity.compact,
+                          label: Text('S/E'),
+                          avatar: Icon(Icons.close, size: 16),
+                        )
+                      else if (baixo)
+                        const Chip(
+                          padding: EdgeInsets.zero,
+                          visualDensity: VisualDensity.compact,
+                          label: Text('Baixo'),
+                          avatar: Icon(Icons.warning_amber, size: 16),
+                        ),
+                    ],
+                  ),
                 ],
               ),
             ),
             _QtyStepper(
               value: qtd,
               onChanged: (v) => setState(() => qtd = v),
-              max: widget.estoque > 0
-                  ? widget.estoque
-                  : null, // opcional limitar ao estoque
+              max: widget.estoque > 0 ? widget.estoque : 1, // evita 0
             ),
             const SizedBox(width: 8),
             FilledButton.tonalIcon(
-              onPressed: low ? null : () => widget.onAdd(qtd),
+              onPressed: se ? null : () => widget.onAdd(qtd),
               icon: const Icon(Icons.add_shopping_cart),
               label: const Text('Adicionar'),
             ),
@@ -284,7 +327,7 @@ class _ManualSaleCheckoutPageState
     super.dispose();
   }
 
-  String _fmt(num v) => 'R\$ ${v.toStringAsFixed(2).replaceAll('.', ',')}';
+  String _fmtLocal(num v) => _fmt(v);
 
   double _parseDiscount() {
     final raw = _discountCtrl.text.trim().replaceAll(',', '.');
@@ -296,9 +339,9 @@ class _ManualSaleCheckoutPageState
     final items = ref.watch(cartProvider);
     final subtotal = ref.watch(cartSubtotalProvider);
     final d = _parseDiscount();
-    final desconto = percent ? subtotal * (d / 100.0) : d;
-
-    // 👇 antes: clamp retornava num; agora garantimos double
+    final descontoBruto = percent ? subtotal * (d / 100.0) : d;
+    // impede desconto > subtotal
+    final desconto = descontoBruto.clamp(0.0, subtotal).toDouble();
     final double total =
         (subtotal - desconto).clamp(0.0, double.infinity).toDouble();
 
@@ -314,8 +357,9 @@ class _ManualSaleCheckoutPageState
                 for (final it in items)
                   ListTile(
                     title: Text(it.nome),
-                    subtitle: Text('${it.quantity} × ${_fmt(it.unitPrice)}'),
-                    trailing: Text(_fmt(it.total)),
+                    subtitle:
+                        Text('${it.quantity} × ${_fmtLocal(it.unitPrice)}'),
+                    trailing: Text(_fmtLocal(it.total)),
                   ),
               ],
             ),
@@ -397,7 +441,7 @@ class _ManualSaleCheckoutPageState
                   : () => _finalizar(total, desconto),
               child: Text(saving
                   ? 'Finalizando...'
-                  : 'Finalizar venda • ${_fmt(total)}'),
+                  : 'Finalizar venda • ${_fmtLocal(total)}'),
             ),
           ),
         ],
@@ -417,15 +461,18 @@ class _ManualSaleCheckoutPageState
       final db = FirebaseFirestore.instance;
       final uid = FirebaseAuth.instance.currentUser!.uid;
 
+      // snapshot dos itens ANTES de limpar (para recibo)
+      final itemsSnapshot = List<CartItem>.from(ref.read(cartProvider));
+      final subtotal = ref.read(cartSubtotalProvider);
+
       // 1) registra venda
-      final items = ref.read(cartProvider);
       final vendaRef = await db
           .collection('tenants')
           .doc(tenantId)
           .collection('vendas')
           .add({
         'itens': [
-          for (final it in items)
+          for (final it in itemsSnapshot)
             {
               'productId': it.productId,
               'nome': it.nome,
@@ -434,7 +481,7 @@ class _ManualSaleCheckoutPageState
               'total': it.total,
             }
         ],
-        'subtotal': ref.read(cartSubtotalProvider),
+        'subtotal': subtotal,
         'desconto': desconto,
         'total': total,
         'pagamento': method,
@@ -444,7 +491,7 @@ class _ManualSaleCheckoutPageState
 
       // 2) baixa do estoque
       final mov = FirestoreMovements(db, tenantId);
-      for (final it in items) {
+      for (final it in itemsSnapshot) {
         await mov.applyMovement(
           produtoId: it.productId,
           tipo: 'saida',
@@ -459,8 +506,14 @@ class _ManualSaleCheckoutPageState
       // 3) limpa carrinho
       ref.read(cartProvider.notifier).clear();
 
-      // 4) recibo (mantém como estava no seu arquivo)
-      await _compartilharRecibo(vendaRef.id, total, desconto);
+      // 4) recibo (usando o snapshot)
+      await _compartilharRecibo(
+        vendaRef.id,
+        total: total,
+        desconto: desconto,
+        subtotal: subtotal,
+        items: itemsSnapshot,
+      );
 
       if (mounted) {
         Navigator.of(context).popUntil((r) => r.isFirst);
@@ -478,10 +531,13 @@ class _ManualSaleCheckoutPageState
   }
 
   Future<void> _compartilharRecibo(
-      String vendaId, double total, double desconto) async {
+    String vendaId, {
+    required double total,
+    required double desconto,
+    required double subtotal,
+    required List<CartItem> items,
+  }) async {
     final tenantId = ref.read(tenantIdProvider);
-    final items = ref.read(
-        cartProvider); // já limpou no _finalizar, então pegue antes se quiser detalhar
 
     String loja = tenantId ?? 'SmartStock';
     try {
@@ -494,11 +550,11 @@ class _ManualSaleCheckoutPageState
       }
     } catch (_) {}
 
-    final subtotal = ref.read(cartSubtotalProvider) + desconto;
     final buffer = StringBuffer()
       ..writeln('Recibo – $loja')
       ..writeln('Venda: $vendaId')
       ..writeln('-----------------------------');
+
     for (final it in items) {
       buffer.writeln(
           '${it.quantity}× ${it.nome} @ ${_fmt(it.unitPrice)} = ${_fmt(it.total)}');
