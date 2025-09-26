@@ -2,14 +2,15 @@ import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:smartstock_flutter_only/features/auth/auth_providers.dart';
 
 import 'features/home/dashboard_page.dart';
-import 'features/products/product_list_page.dart';
+import 'features/products/product_list_page.dart'
+    show ProductListPage, isAdminProvider;
 import 'features/chat/chat_page.dart';
 import 'features/auth/profile_page.dart';
 import 'features/settings/theme_mode_provider.dart';
 import 'features/tenant/tenant_provider.dart';
-import 'features/products/product_list_page.dart' show isAdminProvider;
 import 'features/sales/manual_sale_flow.dart';
 
 class HomePage extends ConsumerStatefulWidget {
@@ -25,13 +26,10 @@ class _HomePageState extends ConsumerState<HomePage> {
   Widget build(BuildContext context) {
     final mode = ref.watch(themeModeProvider);
     final tenantId = ref.watch(tenantIdProvider);
-    final isAdmin = ref.watch(isAdminProvider).maybeWhen(
-          data: (v) => v,
-          orElse: () => false,
-        );
+    final isAdmin = ref.watch(isAdminProvider); // bool
 
-    // use IndexedStack para manter o estado das telas
-    final List<Widget> pages = [
+    // Mantém estado das telas
+    final pages = <Widget>[
       DashboardPage(onConsultarEstoque: () => setState(() => index = 1)),
       const ProductListPage(),
       const ChatPage(),
@@ -65,7 +63,8 @@ class _HomePageState extends ConsumerState<HomePage> {
           IconButton(
             tooltip: 'Alternar tema',
             icon: Icon(
-                mode == ThemeMode.dark ? Icons.dark_mode : Icons.light_mode),
+              mode == ThemeMode.dark ? Icons.dark_mode : Icons.light_mode,
+            ),
             onPressed: () {
               final n = ref.read(themeModeProvider.notifier);
               n.state =
@@ -76,9 +75,7 @@ class _HomePageState extends ConsumerState<HomePage> {
             tooltip: 'Sair',
             icon: const Icon(Icons.logout),
             onPressed: () async {
-              await ref
-                  .read(tenantIdProvider.notifier)
-                  .set(null); // limpa tenant salvo
+              await ref.read(tenantIdProvider.notifier).set(null);
               await FirebaseAuth.instance.signOut();
             },
           ),
@@ -115,88 +112,57 @@ class _HomePageState extends ConsumerState<HomePage> {
     );
   }
 
+  double _parsePreco(String raw) {
+    // aceita "12,34" ou "12.34"
+    final s = raw
+        .trim()
+        .replaceAll('R\$', '')
+        .replaceAll(' ', '')
+        .replaceAll(',', '.');
+    return double.tryParse(s) ?? 0.0;
+  }
+
   Future<void> _addProduct(BuildContext context) async {
     final nameCtrl = TextEditingController();
+    final brandCtrl = TextEditingController();
     final qtdCtrl = TextEditingController(text: '0');
     final minCtrl = TextEditingController(text: '0');
     final priceCtrl = TextEditingController(text: '0');
-    final brandCtrl = TextEditingController();
+
+    String? err;
 
     await showDialog(
       context: context,
-      builder: (_) => AlertDialog(
-        title: const Text('Novo produto'),
-        content: SizedBox(
-          width: 420,
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              TextField(
-                controller: nameCtrl,
-                decoration: const InputDecoration(labelText: 'Nome'),
-                textInputAction: TextInputAction.next,
-              ),
-              const SizedBox(height: 8),
-              TextField(
-                controller: brandCtrl,
-                decoration:
-                    const InputDecoration(labelText: 'Marca (opcional)'),
-                textInputAction: TextInputAction.next,
-              ),
-              const SizedBox(height: 8),
-              TextField(
-                controller: qtdCtrl,
-                decoration: const InputDecoration(labelText: 'Quantidade'),
-                keyboardType: TextInputType.number,
-                textInputAction: TextInputAction.next,
-              ),
-              const SizedBox(height: 8),
-              TextField(
-                controller: minCtrl,
-                decoration: const InputDecoration(labelText: 'Estoque mínimo'),
-                keyboardType: TextInputType.number,
-                textInputAction: TextInputAction.next,
-              ),
-              const SizedBox(height: 8),
-              TextField(
-                controller: priceCtrl,
-                decoration:
-                    const InputDecoration(labelText: 'Preço de venda (R\$)'),
-                keyboardType:
-                    const TextInputType.numberWithOptions(decimal: true),
-              ),
-            ],
-          ),
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(context),
-            child: const Text('Cancelar'),
-          ),
-          FilledButton(
-            onPressed: () async {
-              final tenantId = ref.read(tenantIdProvider);
-              if (tenantId == null) return;
+      builder: (_) => StatefulBuilder(
+        builder: (ctx, setLocal) {
+          Future<void> save() async {
+            final tenantId = ref.read(tenantIdProvider);
+            if (tenantId == null) return;
 
-              final nome = nameCtrl.text.trim();
-              final marca = brandCtrl.text.trim();
-              final quantidade = int.tryParse(qtdCtrl.text.trim()) ?? 0;
-              final minimo = int.tryParse(minCtrl.text.trim()) ?? 0;
-              final preco = double.tryParse(
-                    priceCtrl.text.trim().replaceAll(',', '.'),
-                  ) ??
-                  0.0;
+            final nome = nameCtrl.text.trim();
+            final marca = brandCtrl.text.trim();
+            final quantidade = int.tryParse(qtdCtrl.text.trim()) ?? 0;
+            final minimo = int.tryParse(minCtrl.text.trim()) ?? 0;
+            final preco = _parsePreco(priceCtrl.text);
 
-              if (nome.isEmpty) return;
+            if (nome.isEmpty) {
+              setLocal(() => err = 'Informe o nome.');
+              return;
+            }
+            if (quantidade < 0 || minimo < 0 || preco < 0) {
+              setLocal(() => err = 'Valores não podem ser negativos.');
+              return;
+            }
 
+            try {
               final data = <String, dynamic>{
                 'nome': nome,
                 'nomeLower': nome.toLowerCase(),
                 'quantidade': quantidade,
                 'estoqueMinimo': minimo,
-                'precoVenda': preco, // campo padrão de preço
-                'updatedAt': FieldValue.serverTimestamp(),
+                'precoVenda': preco,
                 'createdAt': FieldValue.serverTimestamp(),
+                'updatedAt': FieldValue.serverTimestamp(),
               };
               if (marca.isNotEmpty) data['marca'] = marca;
 
@@ -206,16 +172,82 @@ class _HomePageState extends ConsumerState<HomePage> {
                   .collection('produtos')
                   .add(data);
 
-              if (context.mounted) {
-                Navigator.pop(context);
-                ScaffoldMessenger.of(context).showSnackBar(
-                  const SnackBar(content: Text('Produto criado.')),
-                );
-              }
-            },
-            child: const Text('Salvar'),
-          ),
-        ],
+              if (!context.mounted) return;
+              Navigator.pop(context);
+              ScaffoldMessenger.of(
+                context,
+              ).showSnackBar(const SnackBar(content: Text('Produto criado.')));
+            } on FirebaseException catch (e) {
+              setLocal(() => err = '${e.code}: ${e.message}');
+            } catch (e) {
+              setLocal(() => err = e.toString());
+            }
+          }
+
+          return AlertDialog(
+            title: const Text('Novo produto'),
+            content: SizedBox(
+              width: 420,
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  TextField(
+                    controller: nameCtrl,
+                    decoration: const InputDecoration(labelText: 'Nome'),
+                  ),
+                  const SizedBox(height: 8),
+                  TextField(
+                    controller: brandCtrl,
+                    decoration: const InputDecoration(
+                      labelText: 'Marca (opcional)',
+                    ),
+                  ),
+                  const SizedBox(height: 8),
+                  TextField(
+                    controller: qtdCtrl,
+                    decoration: const InputDecoration(labelText: 'Quantidade'),
+                    keyboardType: TextInputType.number,
+                  ),
+                  const SizedBox(height: 8),
+                  TextField(
+                    controller: minCtrl,
+                    decoration: const InputDecoration(
+                      labelText: 'Estoque mínimo',
+                    ),
+                    keyboardType: TextInputType.number,
+                  ),
+                  const SizedBox(height: 8),
+                  TextField(
+                    controller: priceCtrl,
+                    decoration: const InputDecoration(
+                      labelText: 'Preço de venda (R\$)',
+                    ),
+                    keyboardType: const TextInputType.numberWithOptions(
+                      decimal: true,
+                    ),
+                  ),
+                  if (err != null) ...[
+                    const SizedBox(height: 8),
+                    Align(
+                      alignment: Alignment.centerLeft,
+                      child: Text(
+                        err!,
+                        style: const TextStyle(color: Colors.red),
+                      ),
+                    ),
+                  ],
+                ],
+              ),
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.pop(context),
+                child: const Text('Cancelar'),
+              ),
+              FilledButton(onPressed: save, child: const Text('Salvar')),
+            ],
+          );
+        },
       ),
     );
   }

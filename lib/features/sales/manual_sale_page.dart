@@ -9,6 +9,8 @@ import '../tenant/tenant_provider.dart';
 import '../../data/datasources/firestore_movements.dart';
 import 'cart_state.dart';
 
+String _fmt(num v) => 'R\$ ${v.toStringAsFixed(2).replaceAll('.', ',')}';
+
 /// Stream de produtos da loja atual
 final _productsProvider =
     StreamProvider<QuerySnapshot<Map<String, dynamic>>>((ref) {
@@ -22,9 +24,7 @@ final _productsProvider =
       .snapshots();
 });
 
-String _fmt(num v) => 'R\$ ${v.toStringAsFixed(2).replaceAll('.', ',')}';
-
-/// Página 1: catálogo
+/// Página 1: catálogo com cards + stepper + resumo no rodapé
 class ManualSaleCatalogPage extends ConsumerStatefulWidget {
   const ManualSaleCatalogPage({super.key});
   @override
@@ -41,9 +41,50 @@ class _ManualSaleCatalogPageState extends ConsumerState<ManualSaleCatalogPage> {
     final uniqueCount = ref.watch(cartCountProvider);
     final subtotal = ref.watch(cartSubtotalProvider);
     final totalQty = ref.watch(cartTotalQtyProvider);
+    final cartItems = ref.watch(cartProvider); // para calcular “já no carrinho”
 
     return Scaffold(
-      appBar: AppBar(title: const Text('Vender')),
+      appBar: AppBar(
+        title: const Text('Vender'),
+        actions: [
+          // Badge do carrinho no AppBar
+          Stack(
+            alignment: Alignment.center,
+            children: [
+              IconButton(
+                icon: const Icon(Icons.shopping_cart_outlined),
+                onPressed: uniqueCount == 0
+                    ? null
+                    : () {
+                        Navigator.of(context).push(
+                          MaterialPageRoute(
+                            builder: (_) => const ManualSaleCheckoutPage(),
+                          ),
+                        );
+                      },
+              ),
+              if (uniqueCount > 0)
+                Positioned(
+                  right: 10,
+                  top: 10,
+                  child: Container(
+                    padding:
+                        const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                    decoration: BoxDecoration(
+                      color: Colors.redAccent,
+                      borderRadius: BorderRadius.circular(12),
+                    ),
+                    child: Text(
+                      '$uniqueCount',
+                      style: const TextStyle(
+                          color: Colors.white, fontSize: 11, height: 1),
+                    ),
+                  ),
+                ),
+            ],
+          ),
+        ],
+      ),
       body: Column(
         children: [
           Padding(
@@ -82,24 +123,36 @@ class _ManualSaleCatalogPageState extends ConsumerState<ManualSaleCatalogPage> {
                     final m = docs[i].data();
                     final id = docs[i].id;
 
-                    // ---------- PADRONIZAÇÃO DE CAMPOS ----------
                     final nome = (m['nome'] ?? '').toString();
                     final marca = (m['marca'] ?? '').toString();
+
                     final qAny = m['quantidade'] ?? m['Quantidade'] ?? 0;
-                    final minAny =
-                        m['estoqueMinimo'] ?? m['EstoqueMinimo'] ?? 0;
                     final estoque =
                         qAny is num ? qAny.toInt() : int.tryParse('$qAny') ?? 0;
+
+                    final minAny =
+                        m['estoqueMinimo'] ?? m['EstoqueMinimo'] ?? 0;
                     final minimo = minAny is num
                         ? minAny.toInt()
                         : int.tryParse('$minAny') ?? 0;
 
-                    // preço unitário: preferimos `valor` (padrão), caindo para `precoVenda` se existir
                     final priceAny = m['valor'] ?? m['precoVenda'] ?? 0.0;
                     final price = priceAny is num
                         ? priceAny.toDouble()
                         : double.tryParse('$priceAny') ?? 0.0;
-                    // -------------------------------------------
+
+                    // Quantidade já no carrinho para este produto
+                    final alreadyInCart = cartItems
+                        .firstWhere(
+                          (e) => e.productId == id,
+                          orElse: () => const CartItem(
+                            productId: '',
+                            nome: '',
+                            quantity: 0,
+                            unitPrice: 0,
+                          ),
+                        )
+                        .quantity;
 
                     return _ProductCard(
                       productId: id,
@@ -107,22 +160,32 @@ class _ManualSaleCatalogPageState extends ConsumerState<ManualSaleCatalogPage> {
                       marca: marca,
                       estoque: estoque,
                       minimo: minimo,
+                      alreadyInCart: alreadyInCart,
                       price: price,
                       onAdd: (qtd) {
-                        if (qtd <= 0) return;
+                        final remaining = estoque - alreadyInCart;
+                        if (remaining <= 0) {
+                          ScaffoldMessenger.of(context).showSnackBar(
+                            SnackBar(
+                                content: Text(
+                                    'Sem saldo restante de "$nome" para adicionar.')),
+                          );
+                          return;
+                        }
+                        final toAdd = qtd.clamp(1, remaining);
                         ref.read(cartProvider.notifier).addOrInc(
                               CartItem(
                                 productId: id,
                                 nome: nome,
-                                quantity: qtd,
+                                quantity: toAdd,
                                 unitPrice: price,
                               ),
-                              by: qtd,
+                              by: toAdd,
                             );
                         ScaffoldMessenger.of(context).showSnackBar(
                           SnackBar(
                               content: Text(
-                                  '$qtd × "$nome" adicionado ao carrinho.')),
+                                  '$toAdd × "$nome" adicionado ao carrinho.')),
                         );
                       },
                     );
@@ -136,7 +199,7 @@ class _ManualSaleCatalogPageState extends ConsumerState<ManualSaleCatalogPage> {
         ],
       ),
 
-      // Resumo fixo no rodapé
+      // Resumo no rodapé
       bottomNavigationBar: SafeArea(
         child: Container(
           padding: const EdgeInsets.fromLTRB(16, 10, 16, 10),
@@ -178,13 +241,14 @@ class _ManualSaleCatalogPageState extends ConsumerState<ManualSaleCatalogPage> {
   }
 }
 
-/// Card com **stepper** de quantidade + status de estoque (“S/E”, “Baixo”, “OK”)
+/// Card com stepper de quantidade e status de estoque (“S/E”, “Baixo”)
 class _ProductCard extends StatefulWidget {
   final String productId;
   final String nome;
   final String marca;
   final int estoque;
   final int minimo;
+  final int alreadyInCart; // NOVO: já no carrinho
   final double price;
   final void Function(int qtd) onAdd;
 
@@ -194,6 +258,7 @@ class _ProductCard extends StatefulWidget {
     required this.marca,
     required this.estoque,
     required this.minimo,
+    required this.alreadyInCart,
     required this.price,
     required this.onAdd,
   });
@@ -207,10 +272,8 @@ class _ProductCardState extends State<_ProductCard> {
 
   @override
   Widget build(BuildContext context) {
-    // regra solicitada:
-    // - estoque == 0  -> “S/E”
-    // - estoque > 0 e <= mínimo -> “Baixo”
-    // - caso contrário -> “OK” (sem chip)
+    final remaining = (widget.estoque - widget.alreadyInCart).clamp(0, 1 << 31);
+    final semSaldo = remaining <= 0;
     final se = widget.estoque == 0;
     final baixo = !se && widget.estoque <= widget.minimo;
 
@@ -238,8 +301,9 @@ class _ProductCardState extends State<_ProductCard> {
                   Row(
                     children: [
                       Text(
-                          'Estoque: ${widget.estoque}  •  Preço: ${_fmt(widget.price)}',
-                          style: Theme.of(context).textTheme.bodySmall),
+                        'Estoque: ${widget.estoque}  •  Preço: ${_fmt(widget.price)}',
+                        style: Theme.of(context).textTheme.bodySmall,
+                      ),
                       const SizedBox(width: 8),
                       if (se)
                         const Chip(
@@ -257,17 +321,37 @@ class _ProductCardState extends State<_ProductCard> {
                         ),
                     ],
                   ),
+                  if (widget.alreadyInCart > 0 && !semSaldo)
+                    Padding(
+                      padding: const EdgeInsets.only(top: 2),
+                      child: Text(
+                        'No carrinho: ${widget.alreadyInCart}  •  Restante: $remaining',
+                        style: Theme.of(context).textTheme.bodySmall,
+                      ),
+                    ),
+                  if (semSaldo && widget.estoque > 0)
+                    Padding(
+                      padding: const EdgeInsets.only(top: 2),
+                      child: Text(
+                        'Todo o estoque já está no carrinho.',
+                        style: Theme.of(context)
+                            .textTheme
+                            .bodySmall
+                            ?.copyWith(color: Colors.orange),
+                      ),
+                    ),
                 ],
               ),
             ),
             _QtyStepper(
               value: qtd,
               onChanged: (v) => setState(() => qtd = v),
-              max: widget.estoque > 0 ? widget.estoque : 1, // evita 0
+              // limita ao restante disponível (>=1 para UI; botão ADD desabilita quando semSaldo)
+              max: semSaldo ? 1 : remaining,
             ),
             const SizedBox(width: 8),
             FilledButton.tonalIcon(
-              onPressed: se ? null : () => widget.onAdd(qtd),
+              onPressed: semSaldo ? null : () => widget.onAdd(qtd),
               icon: const Icon(Icons.add_shopping_cart),
               label: const Text('Adicionar'),
             ),
@@ -316,8 +400,9 @@ class ManualSaleCheckoutPage extends ConsumerStatefulWidget {
 class _ManualSaleCheckoutPageState
     extends ConsumerState<ManualSaleCheckoutPage> {
   String method = 'pix'; // pix, dinheiro, debito, credito
-  bool percent = false; // desconto em %?
+  bool percent = false; // false = valor, true = porcentagem
   final _discountCtrl = TextEditingController();
+
   bool saving = false;
   String? err;
 
@@ -326,8 +411,6 @@ class _ManualSaleCheckoutPageState
     _discountCtrl.dispose();
     super.dispose();
   }
-
-  String _fmtLocal(num v) => _fmt(v);
 
   double _parseDiscount() {
     final raw = _discountCtrl.text.trim().replaceAll(',', '.');
@@ -340,7 +423,6 @@ class _ManualSaleCheckoutPageState
     final subtotal = ref.watch(cartSubtotalProvider);
     final d = _parseDiscount();
     final descontoBruto = percent ? subtotal * (d / 100.0) : d;
-    // impede desconto > subtotal
     final desconto = descontoBruto.clamp(0.0, subtotal).toDouble();
     final double total =
         (subtotal - desconto).clamp(0.0, double.infinity).toDouble();
@@ -357,9 +439,8 @@ class _ManualSaleCheckoutPageState
                 for (final it in items)
                   ListTile(
                     title: Text(it.nome),
-                    subtitle:
-                        Text('${it.quantity} × ${_fmtLocal(it.unitPrice)}'),
-                    trailing: Text(_fmtLocal(it.total)),
+                    subtitle: Text('${it.quantity} × ${_fmt(it.unitPrice)}'),
+                    trailing: Text(_fmt(it.total)),
                   ),
               ],
             ),
@@ -375,7 +456,8 @@ class _ManualSaleCheckoutPageState
                   Expanded(
                     child: TextField(
                       controller: _discountCtrl,
-                      keyboardType: TextInputType.number,
+                      keyboardType:
+                          const TextInputType.numberWithOptions(decimal: true),
                       decoration: InputDecoration(
                         labelText: percent ? 'Desconto (%)' : 'Desconto (R\$)',
                       ),
@@ -403,25 +485,29 @@ class _ManualSaleCheckoutPageState
             child: Column(
               children: [
                 RadioListTile<String>(
-                    value: 'pix',
-                    groupValue: method,
-                    onChanged: (v) => setState(() => method = v!),
-                    title: const Text('Pix')),
+                  value: 'pix',
+                  groupValue: method,
+                  onChanged: (v) => setState(() => method = v!),
+                  title: const Text('Pix'),
+                ),
                 RadioListTile<String>(
-                    value: 'dinheiro',
-                    groupValue: method,
-                    onChanged: (v) => setState(() => method = v!),
-                    title: const Text('Dinheiro')),
+                  value: 'dinheiro',
+                  groupValue: method,
+                  onChanged: (v) => setState(() => method = v!),
+                  title: const Text('Dinheiro'),
+                ),
                 RadioListTile<String>(
-                    value: 'debito',
-                    groupValue: method,
-                    onChanged: (v) => setState(() => method = v!),
-                    title: const Text('Cartão de débito')),
+                  value: 'debito',
+                  groupValue: method,
+                  onChanged: (v) => setState(() => method = v!),
+                  title: const Text('Cartão de débito'),
+                ),
                 RadioListTile<String>(
-                    value: 'credito',
-                    groupValue: method,
-                    onChanged: (v) => setState(() => method = v!),
-                    title: const Text('Cartão de crédito')),
+                  value: 'credito',
+                  groupValue: method,
+                  onChanged: (v) => setState(() => method = v!),
+                  title: const Text('Cartão de crédito'),
+                ),
               ],
             ),
           ),
@@ -438,10 +524,14 @@ class _ManualSaleCheckoutPageState
             child: FilledButton(
               onPressed: saving || items.isEmpty
                   ? null
-                  : () => _finalizar(total, desconto),
-              child: Text(saving
-                  ? 'Finalizando...'
-                  : 'Finalizar venda • ${_fmtLocal(total)}'),
+                  : () => _finalizar(
+                        total,
+                        desconto,
+                        List<CartItem>.from(items), // snapshot p/ recibo
+                      ),
+              child: Text(
+                saving ? 'Finalizando...' : 'Finalizar venda • ${_fmt(total)}',
+              ),
             ),
           ),
         ],
@@ -449,7 +539,11 @@ class _ManualSaleCheckoutPageState
     );
   }
 
-  Future<void> _finalizar(double total, double desconto) async {
+  Future<void> _finalizar(
+    double total,
+    double desconto,
+    List<CartItem> itemsSnapshot,
+  ) async {
     setState(() {
       saving = true;
       err = null;
@@ -461,9 +555,7 @@ class _ManualSaleCheckoutPageState
       final db = FirebaseFirestore.instance;
       final uid = FirebaseAuth.instance.currentUser!.uid;
 
-      // snapshot dos itens ANTES de limpar (para recibo)
-      final itemsSnapshot = List<CartItem>.from(ref.read(cartProvider));
-      final subtotal = ref.read(cartSubtotalProvider);
+      final subtotal = itemsSnapshot.fold<double>(0.0, (s, it) => s + it.total);
 
       // 1) registra venda
       final vendaRef = await db
@@ -506,17 +598,18 @@ class _ManualSaleCheckoutPageState
       // 3) limpa carrinho
       ref.read(cartProvider.notifier).clear();
 
-      // 4) recibo (usando o snapshot)
+      // 4) recibo
       await _compartilharRecibo(
         vendaRef.id,
-        total: total,
-        desconto: desconto,
-        subtotal: subtotal,
-        items: itemsSnapshot,
+        total,
+        desconto,
+        itemsSnapshot,
+        method,
+        tenantId,
       );
 
+      if (mounted) Navigator.of(context).popUntil((r) => r.isFirst);
       if (mounted) {
-        Navigator.of(context).popUntil((r) => r.isFirst);
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(content: Text('Venda registrada com sucesso.')),
         );
@@ -531,14 +624,14 @@ class _ManualSaleCheckoutPageState
   }
 
   Future<void> _compartilharRecibo(
-    String vendaId, {
-    required double total,
-    required double desconto,
-    required double subtotal,
-    required List<CartItem> items,
-  }) async {
-    final tenantId = ref.read(tenantIdProvider);
-
+    String vendaId,
+    double total,
+    double desconto,
+    List<CartItem> items,
+    String paymentMethod,
+    String? tenantId,
+  ) async {
+    // pegar nome da loja (se existir)
     String loja = tenantId ?? 'SmartStock';
     try {
       if (tenantId != null) {
@@ -550,6 +643,7 @@ class _ManualSaleCheckoutPageState
       }
     } catch (_) {}
 
+    final subtotal = items.fold<double>(0.0, (s, it) => s + it.total);
     final buffer = StringBuffer()
       ..writeln('Recibo – $loja')
       ..writeln('Venda: $vendaId')
@@ -564,13 +658,14 @@ class _ManualSaleCheckoutPageState
       ..writeln('Subtotal: ${_fmt(subtotal)}')
       ..writeln('Desconto: ${_fmt(desconto)}')
       ..writeln('Total:    ${_fmt(total)}')
-      ..writeln('Pagamento: ${method.toUpperCase()}');
+      ..writeln('Pagamento: ${paymentMethod.toUpperCase()}');
 
     final text = buffer.toString();
+
     try {
-      await Share.share(text);
+      await Share.share(text); // WhatsApp, e-mail etc.
     } catch (_) {
-      await Clipboard.setData(ClipboardData(text: text));
+      await Clipboard.setData(ClipboardData(text: text)); // fallback
     }
   }
 }

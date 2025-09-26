@@ -16,7 +16,8 @@ dependencies:
   share_plus: any
   intl: any
   firebase_data_connect: ^0.2.0+1
-
+  cloud_functions: ^5.0.4
+  
 dev_dependencies:
   flutter_test:
     sdk: flutter

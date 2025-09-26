@@ -4,8 +4,8 @@ import 'package:flutter/foundation.dart' show mapEquals;
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
-import '../../features/tenant/tenant_provider.dart';
-import '../../features/tenant/tenant_join_create_page.dart';
+import 'tenant_provider.dart';
+import 'tenant_join_create_page.dart';
 
 /// Observa o documento de membership do usuário na loja.
 /// Retorna o Map com os campos do membership ou null se não existir.
@@ -63,7 +63,7 @@ class MembershipGuard extends ConsumerWidget {
     final tenantId = ref.watch(tenantIdProvider);
     if (tenantId == null) {
       // Logado, mas ainda não escolheu/entrou numa loja
-      return const TenantJoinCreatePage();
+      return TenantJoinCreatePage(); // ⟵ sem const
     }
 
     final asyncMembership = ref.watch(membershipProvider(tenantId));
@@ -73,11 +73,12 @@ class MembershipGuard extends ConsumerWidget {
           loading ??
           const Scaffold(body: Center(child: CircularProgressIndicator())),
       error: (e, _) => Scaffold(
-          body: Center(child: Text('Erro ao carregar permissões: $e'))),
+        body: Center(child: Text('Erro ao carregar permissões: $e')),
+      ),
       data: (m) {
         if (m == null) {
           // Não é membro da loja atual
-          return notMember ?? const TenantJoinCreatePage();
+          return notMember ?? TenantJoinCreatePage(); // ⟵ sem const
         }
 
         final role = (m['role'] ?? '').toString();

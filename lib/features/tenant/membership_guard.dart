@@ -1,96 +1,57 @@
-import 'package:cloud_firestore/cloud_firestore.dart';
-import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:firebase_auth/firebase_auth.dart';
 
-import '../../features/tenant/tenant_provider.dart';
-import '../../features/tenant/tenant_join_create_page.dart';
+import 'tenant_provider.dart';
+import 'tenant_join_create_page.dart';
 
-/// Provider que observa o documento de membership do usuário na loja.
-/// Retorna o Map com os campos do membership ou null se não existir.
-final membershipProvider = StreamProvider.family<Map<String, dynamic>?, String>(
-  (ref, tenantId) {
-    final uid = FirebaseAuth.instance.currentUser?.uid;
-    if (uid == null) return const Stream.empty();
-    final docRef = FirebaseFirestore.instance
-        .collection('tenants')
-        .doc(tenantId)
-        .collection('usuarios')
-        .doc(uid);
+/// Stream do membership do usuário logado para um tenant específico.
+final membershipProvider =
+    StreamProvider.family<Map<String, dynamic>?, String>((ref, tenantId) {
+  final uid = FirebaseAuth.instance.currentUser?.uid;
+  if (uid == null) return const Stream.empty();
+  return FirebaseFirestore.instance
+      .collection('tenants')
+      .doc(tenantId)
+      .collection('usuarios')
+      .doc(uid)
+      .snapshots()
+      .map((d) => d.data());
+});
 
-    return docRef.snapshots().map((snap) => snap.data());
-  },
-);
-
-/// Guarda de rota/área que exige o usuário pertencer ao tenant selecionado.
-/// Se [adminOnly] = true, só permite acesso para role == 'admin'.
-class MembershipGuard extends ConsumerWidget {
+/// Gate que exige o usuário ser membro do tenant atual.
+/// Se não houver tenant selecionado ou membership, manda para Join/Create.
+class RequireMember extends ConsumerWidget {
   final Widget child;
-
-  /// Exigir permissão de admin?
-  final bool adminOnly;
-
-  /// Widgets opcionais de personalização de estados
   final Widget? loading;
   final Widget? notMember;
-  final Widget? notAdmin;
-  final Widget? notLogged;
 
-  const MembershipGuard({
+  const RequireMember({
     super.key,
     required this.child,
-    this.adminOnly = false,
     this.loading,
     this.notMember,
-    this.notAdmin,
-    this.notLogged,
   });
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final user = FirebaseAuth.instance.currentUser;
-    if (user == null) {
-      return notLogged ??
-          const Scaffold(
-            body: Center(child: Text('Faça login para continuar.')),
-          );
-    }
-
     final tenantId = ref.watch(tenantIdProvider);
     if (tenantId == null) {
-      // Usuário logado mas ainda não escolheu/entrou numa loja
       return const TenantJoinCreatePage();
     }
 
-    final asyncMembership = ref.watch(membershipProvider(tenantId));
-
-    return asyncMembership.when(
+    final async = ref.watch(membershipProvider(tenantId));
+    return async.when(
       loading: () =>
           loading ??
           const Scaffold(body: Center(child: CircularProgressIndicator())),
-      error: (e, _) => Scaffold(
-        body: Center(child: Text('Erro ao carregar permissões: $e')),
-      ),
+      error: (e, _) => Scaffold(body: Center(child: Text('Erro: $e'))),
       data: (m) {
-        // Não é membro da loja atual -> direciona para entrar/criar
-        if (m == null) {
+        // sem registro ou está desativado
+        if (m == null || (m['active'] == false)) {
           return notMember ?? const TenantJoinCreatePage();
         }
-
-        // Checagem de admin, se exigido
-        final role = (m['role'] ?? '').toString();
-        if (adminOnly && role != 'admin') {
-          return notAdmin ??
-              Scaffold(
-                appBar: AppBar(title: const Text('Permissão insuficiente')),
-                body: const Center(
-                  child:
-                      Text('Você não tem acesso de administrador nesta loja.'),
-                ),
-              );
-        }
-
-        // Acesso liberado
         return child;
       },
     );

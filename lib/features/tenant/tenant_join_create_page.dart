@@ -1,3 +1,4 @@
+// lib/features/tenant/tenant_join_create_page.dart
 import 'dart:math';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
@@ -13,227 +14,250 @@ class TenantJoinCreatePage extends ConsumerStatefulWidget {
 }
 
 class _TenantJoinCreatePageState extends ConsumerState<TenantJoinCreatePage> {
-  final _createForm = GlobalKey<FormState>();
-  final _joinForm = GlobalKey<FormState>();
-
+  final _joinCode = TextEditingController();
   final _nameCtrl = TextEditingController();
-  final _codeCtrl = TextEditingController();
 
-  bool _creating = false;
-  bool _joining = false;
+  bool _working = false;
+  String? _err, _ok;
 
   @override
   void dispose() {
+    _joinCode.dispose();
     _nameCtrl.dispose();
-    _codeCtrl.dispose();
     super.dispose();
   }
 
-  String _genCode() {
+  String _genCode({int len = 6}) {
     const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
     final r = Random.secure();
-    return List.generate(6, (_) => chars[r.nextInt(chars.length)]).join();
+    return List.generate(len, (_) => chars[r.nextInt(chars.length)]).join();
   }
 
-  Future<String> _createUniqueCode(FirebaseFirestore db) async {
-    // tenta gerar um code único algumas vezes para evitar colisão
-    for (var i = 0; i < 6; i++) {
-      final code = _genCode();
-      final snap = await db.collection('tenant_codes').doc(code).get();
-      if (!snap.exists) return code;
-    }
-    throw Exception('Não foi possível gerar um código único. Tente novamente.');
-  }
+  Future<void> _joinByCode() async {
+    setState(() {
+      _working = true;
+      _err = null;
+      _ok = null;
+    });
 
-  Future<void> _createTenant() async {
-    if (!(_createForm.currentState?.validate() ?? false)) return;
-
-    setState(() => _creating = true);
     try {
-      final user = FirebaseAuth.instance.currentUser!;
-      final uid = user.uid;
-      final db = FirebaseFirestore.instance;
-
-      final code = await _createUniqueCode(db);
-
-      // cria tenant
-      final tenantRef = await db.collection('tenants').add({
-        'name': _nameCtrl.text.trim(),
-        'code': code,
-        'ownerUid': uid,
-        'createdAt': FieldValue.serverTimestamp(),
-      });
-
-      // index público para ingresso por código
-      await db.collection('tenant_codes').doc(code).set({
-        'tenantId': tenantRef.id,
-        'createdAt': FieldValue.serverTimestamp(),
-      });
-
-      // membership do criador como admin
-      await tenantRef.collection('usuarios').doc(uid).set({
-        'uid': uid,
-        'role': 'admin',
-        'displayName': user.displayName,
-        'email': user.email,
-        'joinedAt': FieldValue.serverTimestamp(),
-      });
-
-      ref.read(tenantIdProvider.notifier).state = tenantRef.id;
-
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('Loja criada com sucesso.')),
-        );
-        Navigator.of(context).pushReplacementNamed('/');
-      }
-    } on FirebaseException catch (e) {
-      _showErr('${e.code}: ${e.message}');
-    } catch (e) {
-      _showErr(e.toString());
-    } finally {
-      if (mounted) setState(() => _creating = false);
-    }
-  }
-
-  Future<void> _joinTenant() async {
-    if (!(_joinForm.currentState?.validate() ?? false)) return;
-
-    setState(() => _joining = true);
-    try {
-      final user = FirebaseAuth.instance.currentUser!;
-      final uid = user.uid;
-      final db = FirebaseFirestore.instance;
-
-      final code = _codeCtrl.text.trim().toUpperCase();
-      final codeDoc = await db.collection('tenant_codes').doc(code).get();
-      if (!codeDoc.exists) {
-        _showErr('Loja não encontrada para o código informado.');
+      final code = _joinCode.text.trim().toUpperCase();
+      if (code.isEmpty) {
+        setState(() => _err = 'Informe um código.');
         return;
       }
 
-      final tenantId = codeDoc.get('tenantId') as String;
-      final tenantRef = db.collection('tenants').doc(tenantId);
+      final db = FirebaseFirestore.instance;
+      String? tenantId;
 
-      // cria/atualiza membership
-      await tenantRef.collection('usuarios').doc(uid).set({
-        'uid': uid,
+      // 1) Primeiro tenta direto em /tenants pelo campo 'code'
+      final snapTenants = await db
+          .collection('tenants')
+          .where('code', isEqualTo: code)
+          .limit(1)
+          .get();
+      if (snapTenants.docs.isNotEmpty) {
+        tenantId = snapTenants.docs.first.id;
+      } else {
+        // 2) Fallback: /tenant_codes (se você ainda usa esse alias)
+        final snapCodes = await db
+            .collection('tenant_codes')
+            .where('code', isEqualTo: code)
+            .limit(1)
+            .get();
+        if (snapCodes.docs.isNotEmpty) {
+          tenantId = (snapCodes.docs.first.data()['tenantId'] ?? '').toString();
+        }
+      }
+
+      if (tenantId == null || tenantId.isEmpty) {
+        setState(() => _err = 'Código inválido.');
+        return;
+      }
+
+      final uid = FirebaseAuth.instance.currentUser!.uid;
+
+      // Cria/atualiza membership do próprio usuário como 'staff'
+      await db
+          .collection('tenants')
+          .doc(tenantId)
+          .collection('usuarios')
+          .doc(uid)
+          .set({
         'role': 'staff',
-        'displayName': user.displayName,
-        'email': user.email,
+        'active': true,
+        'displayName': FirebaseAuth.instance.currentUser?.displayName ?? '',
+        'email': FirebaseAuth.instance.currentUser?.email ?? '',
         'joinedAt': FieldValue.serverTimestamp(),
       }, SetOptions(merge: true));
 
-      ref.read(tenantIdProvider.notifier).state = tenantId;
+      // Salva seleção local
+      await ref.read(tenantIdProvider.notifier).set(tenantId);
 
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Ingresso realizado na loja ($code).')),
-        );
-        Navigator.of(context).pushReplacementNamed('/');
-      }
+      setState(() => _ok = 'Você entrou na loja.');
     } on FirebaseException catch (e) {
-      _showErr('${e.code}: ${e.message}');
+      setState(() => _err = '${e.code}: ${e.message}');
     } catch (e) {
-      _showErr(e.toString());
+      setState(() => _err = e.toString());
     } finally {
-      if (mounted) setState(() => _joining = false);
+      if (mounted) setState(() => _working = false);
     }
   }
 
-  void _showErr(String msg) {
-    if (!mounted) return;
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(content: Text(msg), backgroundColor: Colors.red.shade700),
-    );
+  Future<void> _createTenant() async {
+    setState(() {
+      _working = true;
+      _err = null;
+      _ok = null;
+    });
+
+    try {
+      final name = _nameCtrl.text.trim();
+      if (name.isEmpty) {
+        setState(() => _err = 'Informe o nome da loja.');
+        return;
+      }
+
+      final db = FirebaseFirestore.instance;
+      final uid = FirebaseAuth.instance.currentUser!.uid;
+
+      // Gera code curto e garante unicidade básica em /tenants
+      String code = _genCode();
+      for (int i = 0; i < 6; i++) {
+        final exists = await db
+            .collection('tenants')
+            .where('code', isEqualTo: code)
+            .limit(1)
+            .get();
+        if (exists.docs.isEmpty) break;
+        code = _genCode();
+      }
+
+      // Cria tenant com TODOS os campos exigidos pelas rules
+      final tRef = await db.collection('tenants').add({
+        'name': name,
+        'code': code,
+        'createdBy': uid, // obrigatório p/ rule de create
+        'createdAt': FieldValue.serverTimestamp(),
+        'updatedAt': FieldValue.serverTimestamp(),
+      });
+
+      // Criador vira admin
+      await tRef.collection('usuarios').doc(uid).set({
+        'role': 'admin',
+        'active': true,
+        'displayName': FirebaseAuth.instance.currentUser?.displayName ?? '',
+        'email': FirebaseAuth.instance.currentUser?.email ?? '',
+        'joinedAt': FieldValue.serverTimestamp(),
+      }, SetOptions(merge: true));
+
+      // (Opcional) cria alias em /tenant_codes — útil pra compartilhar
+      try {
+        await db.collection('tenant_codes').add({
+          'code': code,
+          'tenantId': tRef.id,
+          'createdAt': FieldValue.serverTimestamp(),
+          'createdBy': uid,
+        });
+      } catch (_) {
+        // se a coleção não existir / regra bloquear, não quebra o fluxo principal
+      }
+
+      // Salva tenant selecionado
+      await ref.read(tenantIdProvider.notifier).set(tRef.id);
+
+      setState(() => _ok = 'Loja criada. Código de convite: $code');
+    } on FirebaseException catch (e) {
+      setState(() => _err = '(${e.code}) ${e.message}');
+    } catch (e) {
+      setState(() => _err = e.toString());
+    } finally {
+      if (mounted) setState(() => _working = false);
+    }
   }
 
   @override
   Widget build(BuildContext context) {
+    final theme = Theme.of(context);
     return Scaffold(
-      appBar: AppBar(title: const Text('Sua loja')),
+      appBar: AppBar(title: const Text('Selecionar loja')),
       body: ListView(
         padding: const EdgeInsets.all(16),
         children: [
-          // CRIAR LOJA
+          // Entrar por código
           Card(
             child: Padding(
               padding: const EdgeInsets.all(16),
-              child: Form(
-                key: _createForm,
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text('Criar nova loja',
-                        style: Theme.of(context).textTheme.titleMedium),
-                    const SizedBox(height: 12),
-                    TextFormField(
-                      controller: _nameCtrl,
-                      decoration:
-                          const InputDecoration(labelText: 'Nome da loja'),
-                      validator: (v) => (v == null || v.trim().isEmpty)
-                          ? 'Informe o nome.'
-                          : null,
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text('Entrar numa loja existente',
+                      style: theme.textTheme.titleMedium),
+                  const SizedBox(height: 8),
+                  TextField(
+                    controller: _joinCode,
+                    textCapitalization: TextCapitalization.characters,
+                    decoration: const InputDecoration(
+                      labelText: 'Código da loja',
+                      hintText: 'Ex.: 7K3W9Q',
+                      prefixIcon: Icon(Icons.key_outlined),
                     ),
-                    const SizedBox(height: 12),
-                    FilledButton.icon(
-                      onPressed: _creating ? null : _createTenant,
-                      icon: _creating
-                          ? const SizedBox(
-                              width: 18,
-                              height: 18,
-                              child: CircularProgressIndicator(strokeWidth: 2),
-                            )
-                          : const Icon(Icons.add_business),
-                      label: Text(_creating ? 'Criando...' : 'Criar e entrar'),
+                    onSubmitted: (_) => _working ? null : _joinByCode(),
+                  ),
+                  const SizedBox(height: 8),
+                  SizedBox(
+                    width: double.infinity,
+                    child: FilledButton(
+                      onPressed: _working ? null : _joinByCode,
+                      child: Text(_working ? 'Processando...' : 'Entrar'),
                     ),
-                  ],
-                ),
+                  ),
+                ],
               ),
             ),
           ),
-          const SizedBox(height: 16),
+          const SizedBox(height: 12),
 
-          // ENTRAR POR CÓDIGO
+          // Criar nova loja
           Card(
             child: Padding(
               padding: const EdgeInsets.all(16),
-              child: Form(
-                key: _joinForm,
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text('Entrar em loja existente',
-                        style: Theme.of(context).textTheme.titleMedium),
-                    const SizedBox(height: 12),
-                    TextFormField(
-                      controller: _codeCtrl,
-                      textCapitalization: TextCapitalization.characters,
-                      decoration: const InputDecoration(
-                          labelText: 'Código da loja (6 chars)'),
-                      validator: (v) {
-                        final code = (v ?? '').trim();
-                        if (code.length < 4) return 'Código inválido.';
-                        return null;
-                      },
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text('Criar nova loja', style: theme.textTheme.titleMedium),
+                  const SizedBox(height: 8),
+                  TextField(
+                    controller: _nameCtrl,
+                    decoration: const InputDecoration(
+                      labelText: 'Nome da loja',
+                      prefixIcon: Icon(Icons.store_mall_directory_outlined),
                     ),
-                    const SizedBox(height: 12),
-                    OutlinedButton.icon(
-                      onPressed: _joining ? null : _joinTenant,
-                      icon: _joining
-                          ? const SizedBox(
-                              width: 18,
-                              height: 18,
-                              child: CircularProgressIndicator(strokeWidth: 2),
-                            )
-                          : const Icon(Icons.login),
-                      label: Text(_joining ? 'Entrando...' : 'Entrar'),
+                    onSubmitted: (_) => _working ? null : _createTenant(),
+                  ),
+                  const SizedBox(height: 8),
+                  SizedBox(
+                    width: double.infinity,
+                    child: FilledButton.tonal(
+                      onPressed: _working ? null : _createTenant,
+                      child: Text(_working ? 'Criando...' : 'Criar loja'),
                     ),
-                  ],
-                ),
+                  ),
+                ],
               ),
             ),
           ),
+
+          if (_err != null)
+            Padding(
+              padding: const EdgeInsets.only(top: 12),
+              child: Text(_err!, style: const TextStyle(color: Colors.red)),
+            ),
+          if (_ok != null)
+            Padding(
+              padding: const EdgeInsets.only(top: 12),
+              child: Text(_ok!, style: const TextStyle(color: Colors.green)),
+            ),
         ],
       ),
     );

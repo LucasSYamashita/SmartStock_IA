@@ -1,3 +1,4 @@
+// lib/features/auth/profile_page.dart
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/material.dart';
@@ -55,6 +56,12 @@ class _ProfilePageState extends ConsumerState<ProfilePage> {
     _name.text = user.displayName ?? '';
   }
 
+  @override
+  void dispose() {
+    _name.dispose();
+    super.dispose();
+  }
+
   Future<void> _saveName() async {
     final tenantId = ref.read(tenantIdProvider);
     setState(() {
@@ -78,17 +85,25 @@ class _ProfilePageState extends ConsumerState<ProfilePage> {
         }, SetOptions(merge: true));
       }
 
-      setState(() => msg = 'Nome atualizado.');
+      if (mounted) setState(() => msg = 'Nome atualizado.');
     } catch (e) {
-      setState(() => msg = e.toString());
+      if (mounted) setState(() => msg = e.toString());
     } finally {
-      setState(() => working = false);
+      if (mounted) setState(() => working = false);
     }
   }
 
   Future<void> _sendResetPassword() async {
     try {
-      await FirebaseAuth.instance.sendPasswordResetEmail(email: user.email!);
+      final email = user.email;
+      if (email == null || email.isEmpty) {
+        if (!mounted) return;
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Sua conta não possui e-mail.')),
+        );
+        return;
+      }
+      await FirebaseAuth.instance.sendPasswordResetEmail(email: email);
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(
@@ -107,12 +122,38 @@ class _ProfilePageState extends ConsumerState<ProfilePage> {
   Future<void> _regenerateCode() async {
     final tenantId = ref.read(tenantIdProvider);
     if (tenantId == null) return;
+    final db = FirebaseFirestore.instance;
+
     try {
+      // lê o código atual (se houver) para remover de tenant_codes
+      final tSnap =
+          await db.collection('tenants').doc(tenantId).get(const GetOptions());
+      final oldCode = (tSnap.data()?['code'] ?? '').toString();
+
       final newCode = _randomCode();
-      await FirebaseFirestore.instance
-          .collection('tenants')
-          .doc(tenantId)
-          .update({'code': newCode});
+
+      final batch = db.batch();
+
+      // atualiza em tenants/{id}.code
+      final tRef = db.collection('tenants').doc(tenantId);
+      batch.update(tRef, {'code': newCode});
+
+      // apaga doc antigo em tenant_codes/{oldCode} se existir
+      if (oldCode.isNotEmpty) {
+        final oldRef = db.collection('tenant_codes').doc(oldCode);
+        batch.delete(oldRef);
+      }
+
+      // cria/atualiza doc novo em tenant_codes/{newCode}
+      final newRef = db.collection('tenant_codes').doc(newCode);
+      batch.set(newRef, {
+        'tenantId': tenantId,
+        'code': newCode,
+        'createdAt': FieldValue.serverTimestamp(),
+      });
+
+      await batch.commit();
+
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(content: Text('Novo código: $newCode')),
@@ -129,10 +170,12 @@ class _ProfilePageState extends ConsumerState<ProfilePage> {
 
   String _randomCode() {
     const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
-    return List.generate(
-        6,
-        (i) => chars[
-            (DateTime.now().microsecondsSinceEpoch + i) % chars.length]).join();
+    final now = DateTime.now().microsecondsSinceEpoch;
+    final out = StringBuffer();
+    for (var i = 0; i < 6; i++) {
+      out.write(chars[(now + i) % chars.length]);
+    }
+    return out.toString();
   }
 
   void _showInviteSheet(String code, String tenantName) {
@@ -357,7 +400,7 @@ class _ProfilePageState extends ConsumerState<ProfilePage> {
                 children: [
                   ListTile(
                     leading: const Icon(Icons.brightness_6),
-                    title: const Text('Tema escuro'),
+                    title: const Text('Tema'),
                     subtitle:
                         const Text('Alternar claro/escuro (ou seguir sistema)'),
                     trailing: DropdownButton<ThemeMode>(
@@ -375,7 +418,6 @@ class _ProfilePageState extends ConsumerState<ProfilePage> {
                       ],
                     ),
                   ),
-                  // espaço para futuras configs (idioma, moeda, etc.)
                 ],
               ),
             ),

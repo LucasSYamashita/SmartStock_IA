@@ -1,3 +1,4 @@
+// lib/features/chat/chat_page.dart
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:smartstock_flutter_only/features/chat/chat_controller.dart';
@@ -22,11 +23,11 @@ class _ChatPageState extends ConsumerState<ChatPage> {
   @override
   void initState() {
     super.initState();
-    // Sempre rola ao final quando chegarem mensagens novas
+    // Rola para o fim quando chegarem novas mensagens
     ref.listen<List<ChatMessage>>(chatControllerProvider, (prev, next) {
       _jumpToEndSoon();
     });
-    // Atualiza o estado do botão conforme digita
+    // Habilita/desabilita botão conforme digita
     _ctrl.addListener(() => setState(() {}));
   }
 
@@ -39,7 +40,6 @@ class _ChatPageState extends ConsumerState<ChatPage> {
   }
 
   void _jumpToEndSoon() {
-    // espera a lista renderizar antes de rolar
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!_listCtrl.hasClients) return;
       _listCtrl.animateTo(
@@ -72,10 +72,12 @@ class _ChatPageState extends ConsumerState<ChatPage> {
       children: [
         Expanded(
           child: messages.isEmpty
-              ? _EmptyState(onTapExamples: (sample) {
-                  _ctrl.text = sample;
-                  _focus.requestFocus();
-                })
+              ? _EmptyState(
+                  onTapExamples: (sample) {
+                    _ctrl.text = sample;
+                    _focus.requestFocus();
+                  },
+                )
               : ListView.builder(
                   controller: _listCtrl,
                   padding: const EdgeInsets.all(12),
@@ -125,13 +127,12 @@ class _ChatPageState extends ConsumerState<ChatPage> {
                     focusNode: _focus,
                     controller: _ctrl,
                     minLines: 1,
-                    maxLines: 4, // permite digitar mensagens maiores
+                    maxLines: 4,
                     textInputAction: TextInputAction.send,
-                    decoration: InputDecoration(
+                    decoration: const InputDecoration(
                       hintText: 'Ex.: "entrada de 5 do Shampoo Clear"',
-                      prefixIcon: const Icon(Icons.chat_bubble_outline),
+                      prefixIcon: Icon(Icons.chat_bubble_outline),
                     ),
-                    // Enter envia; Shift/Ctrl+Enter quebra linha
                     onSubmitted: (_) => _send(),
                   ),
                 ),
@@ -176,8 +177,11 @@ class _EmptyState extends StatelessWidget {
           child: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
-              Icon(Icons.support_agent,
-                  size: 42, color: Theme.of(context).colorScheme.primary),
+              Icon(
+                Icons.support_agent,
+                size: 42,
+                color: Theme.of(context).colorScheme.primary,
+              ),
               const SizedBox(height: 12),
               Text(
                 'Converse com o SmartStock',

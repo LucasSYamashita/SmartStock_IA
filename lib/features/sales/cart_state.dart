@@ -191,3 +191,27 @@ final cartSubtotalProvider = Provider<double>((ref) {
   final items = ref.watch(cartProvider);
   return items.fold(0.0, (sum, e) => sum + e.total);
 });
+
+/// Quantidade já no carrinho para um produto específico
+final cartQtyForProvider = Provider.family<int, String>((ref, productId) {
+  final items = ref.watch(cartProvider);
+  return items
+      .firstWhere(
+        (e) => e.productId == productId,
+        orElse: () =>
+            const CartItem(productId: '', nome: '', quantity: 0, unitPrice: 0),
+      )
+      .quantity;
+});
+
+/// Subtotal por produto (útil em telas de revisão)
+final cartSubtotalForProvider =
+    Provider.family<double, String>((ref, productId) {
+  final items = ref.watch(cartProvider);
+  final it = items.firstWhere(
+    (e) => e.productId == productId,
+    orElse: () =>
+        const CartItem(productId: '', nome: '', quantity: 0, unitPrice: 0),
+  );
+  return it.total;
+});

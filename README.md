@@ -1,4 +1,4 @@
-# smartstock
+# app
 
 A new Flutter project.
 

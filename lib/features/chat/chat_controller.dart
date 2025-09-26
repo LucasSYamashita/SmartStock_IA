@@ -1,11 +1,13 @@
+// lib/features/chat/chat_controller.dart
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
+import 'package:cloud_firestore/cloud_firestore.dart';
 
-import '../../data/datasources/firestore_movements.dart';
 import '../tenant/tenant_provider.dart';
+import '../../data/datasources/firestore_movements.dart';
 import 'nlu.dart' as nlu;
 
+/// Mensagem exibida na UI do chat
 class ChatMessage {
   final String role; // 'user' | 'assistant'
   final String text;
@@ -21,9 +23,9 @@ class ChatController extends StateNotifier<List<ChatMessage>> {
   ChatController(this._ref) : super(const []);
   final Ref _ref;
 
-  // intenção pendente por tenant (evita confusão ao trocar de loja)
   nlu.Intent? _pendingIntent;
   String? _pendingTenantId;
+  DateTime? _pendingSince;
 
   void _say(String text) {
     state = [...state, ChatMessage('assistant', text)];
@@ -37,13 +39,13 @@ class ChatController extends StateNotifier<List<ChatMessage>> {
 
     final user = FirebaseAuth.instance.currentUser;
     if (user == null) {
-      _say('Faça login para continuar.');
+      _say('⚠️ Faça login para continuar.');
       return;
     }
 
     final tenantId = _ref.read(tenantIdProvider);
     if (tenantId == null) {
-      _say('Selecione/entre em uma loja primeiro.');
+      _say('⚠️ Selecione/entre em uma loja primeiro.');
       return;
     }
 
@@ -52,36 +54,46 @@ class ChatController extends StateNotifier<List<ChatMessage>> {
     final uid = user.uid;
 
     try {
-      // comandos de controle
+      // Normaliza comando de controle
       final low = text.toLowerCase();
       final isConfirm =
-          low == 'confirmar' || low == 'sim' || low == 'ok' || low == 'confirm';
-      final isCancel = low == 'cancelar' || low == 'cancel';
+          const {'confirmar', 'confirm', 'sim', 'ok'}.contains(low);
+      final isCancel = const {'cancelar', 'cancel'}.contains(low);
+
+      // Expira pedido pendente (60s) para evitar confirmações atrasadas
+      if (_pendingSince != null &&
+          DateTime.now().difference(_pendingSince!).inSeconds > 60) {
+        _pendingIntent = null;
+        _pendingTenantId = null;
+        _pendingSince = null;
+      }
 
       if (isCancel) {
         _pendingIntent = null;
         _pendingTenantId = null;
-        _say('Ok, operação cancelada.');
+        _pendingSince = null;
+        _say('✅ Operação cancelada.');
         return;
       }
 
+      // Confirmação de movimento pendente
       if (isConfirm &&
           _pendingIntent is nlu.MoveIntent &&
           _pendingTenantId == tenantId) {
         final intent = _pendingIntent as nlu.MoveIntent;
 
-        // resolve produto antes de aplicar
+        // resolve produto
         final prod =
             await resolveProductByName(intent.produtoNome, db, tenantId);
         if (prod == null) {
           _say(
-              'Produto "${intent.produtoNome}" não encontrado. Tente o nome exato.');
+              '❌ Produto "${intent.produtoNome}" não encontrado. Tente o nome exato.');
           _pendingIntent = null;
           _pendingTenantId = null;
+          _pendingSince = null;
           return;
         }
 
-        // aplica movimento
         await movements.applyMovement(
           produtoId: prod.id,
           tipo: intent.tipo,
@@ -100,27 +112,30 @@ class ChatController extends StateNotifier<List<ChatMessage>> {
         final qAny = data['quantidade'] ?? data['Quantidade'] ?? 0;
         final qtd = qAny is num ? qAny.toInt() : int.tryParse('$qAny') ?? 0;
 
-        _say('✅ ${intent.tipo} registrada: ${intent.quantidade} un. de $nome.\n'
-            'Estoque atual: $qtd un.');
+        _say(
+            '✅ ${intent.tipo} registrada: ${intent.quantidade} un. de "$nome".\n'
+            '📦 Estoque atual: $qtd un.');
 
         _pendingIntent = null;
         _pendingTenantId = null;
+        _pendingSince = null;
         return;
       }
 
-      // interpreta
+      // Interpreta comando
       final intent = nlu.parseCommand(text);
 
+      // Consulta de estoque
       if (intent is nlu.QueryIntent) {
         final prod =
             await resolveProductByName(intent.produtoNome, db, tenantId);
         if (prod == null) {
           final sugg = await suggestProducts(intent.produtoNome, db, tenantId);
           if (sugg.isEmpty) {
-            _say('Não encontrei "${intent.produtoNome}".');
+            _say('❌ Não encontrei "${intent.produtoNome}".');
           } else {
-            _say(
-                'Não encontrei exatamente "${intent.produtoNome}". Você quis dizer:\n• ${sugg.join('\n• ')}');
+            _say('❌ Não encontrei exatamente "${intent.produtoNome}".\n'
+                'Você quis dizer:\n• ${sugg.join('\n• ')}');
           }
           return;
         }
@@ -133,23 +148,24 @@ class ChatController extends StateNotifier<List<ChatMessage>> {
             minAny is num ? minAny.toInt() : int.tryParse('$minAny') ?? 0;
 
         final status = qtd == 0 ? 'S/E' : (qtd <= minimo ? 'Baixo' : 'OK');
-
-        _say('Estoque de "$nome": $qtd un. (mín: $minimo) • Status: $status');
+        _say(
+            '📊 Estoque de "$nome": $qtd un. (mín: $minimo) • Status: $status');
         return;
       }
 
+      // Movimento (entrada/saída)
       if (intent is nlu.MoveIntent) {
-        // tenta resolver já aqui para trazer contexto na confirmação
+        // resolve para confirmar com nome e estoque atual
         final prod =
             await resolveProductByName(intent.produtoNome, db, tenantId);
         if (prod == null) {
           final sugg = await suggestProducts(intent.produtoNome, db, tenantId);
           if (sugg.isEmpty) {
             _say(
-                'Produto "${intent.produtoNome}" não encontrado. Tente o nome exato.');
+                '❌ Produto "${intent.produtoNome}" não encontrado. Tente o nome exato.');
           } else {
             _say(
-                'Produto não encontrado. Você quis dizer:\n• ${sugg.join('\n• ')}');
+                '❌ Produto não encontrado. Você quis dizer:\n• ${sugg.join('\n• ')}');
           }
           return;
         }
@@ -160,23 +176,30 @@ class ChatController extends StateNotifier<List<ChatMessage>> {
 
         _pendingIntent = intent;
         _pendingTenantId = tenantId;
+        _pendingSince = DateTime.now();
 
-        _say('Confirma ${intent.tipo} de ${intent.quantidade} un. de "$nome"? '
-            'Estoque atual: $qtd. Responda "confirmar" ou "cancelar".');
+        _say(
+            '⚙️ Confirmar ${intent.tipo} de ${intent.quantidade} un. de "$nome"? '
+            '(Estoque atual: $qtd)\n'
+            'Responda **confirmar** ou **cancelar**.');
         return;
       }
 
+      // fallback
       _say('Não entendi. Exemplos:\n'
           '• entrada de 5 do Produto X\n'
           '• vendi 2 do Produto Y\n'
           '• quanto tem do Produto Z');
+    } on FirebaseException catch (e) {
+      _say('Erro Firebase: (${e.code}) ${e.message ?? ''}');
     } catch (e) {
-      _say('Erro: ${e.toString()}');
+      _say('Erro: $e');
     }
   }
 }
 
-/// Busca por nome (case-insensitive) com fallback.
+/// -------------------- Busca de produtos por nome ----------------------------
+
 Future<DocumentSnapshot<Map<String, dynamic>>?> resolveProductByName(
   String name,
   FirebaseFirestore db,
@@ -185,15 +208,15 @@ Future<DocumentSnapshot<Map<String, dynamic>>?> resolveProductByName(
   final lower = name.toLowerCase().trim();
   final col = db.collection('tenants').doc(tenantId).collection('produtos');
 
-  // 1) nomeLower == lower
+  // 1) nomeLower == lower (recomendado ter esse campo)
   var snap = await col.where('nomeLower', isEqualTo: lower).limit(1).get();
   if (snap.docs.isNotEmpty) return snap.docs.first;
 
-  // 2) nome == name (exato, mantendo capitalização)
+  // 2) nome == name (exato)
   snap = await col.where('nome', isEqualTo: name.trim()).limit(1).get();
   if (snap.docs.isNotEmpty) return snap.docs.first;
 
-  // 3) prefixo (orderBy + startAt/endAt) — single-field index padrão do Firestore
+  // 3) prefixo por orderBy (exige índice em nomeLower; se faltar, cai no catch)
   try {
     snap = await col
         .orderBy('nomeLower')
@@ -203,10 +226,10 @@ Future<DocumentSnapshot<Map<String, dynamic>>?> resolveProductByName(
         .get();
     if (snap.docs.isNotEmpty) return snap.docs.first;
   } catch (_) {
-    // se o índice não estiver pronto, ignora
+    // sem índice -> ignora e usa fallback
   }
 
-  // 4) fallback: amostra e compara
+  // 4) fallback: sample e compara (tolerante)
   final sample = await col.limit(50).get();
   for (final d in sample.docs) {
     final data = d.data();
@@ -216,7 +239,6 @@ Future<DocumentSnapshot<Map<String, dynamic>>?> resolveProductByName(
   return null;
 }
 
-/// Sugere até 5 produtos cujo nomeLower começa com o termo informado.
 Future<List<String>> suggestProducts(
   String name,
   FirebaseFirestore db,
@@ -243,7 +265,7 @@ Future<List<String>> suggestProducts(
     }
     return out;
   } catch (_) {
-    // fallback simples: amostra e contém
+    // fallback: contém (sem índice)
     final sample = await col.limit(50).get();
     final out = <String>[];
     for (final d in sample.docs) {

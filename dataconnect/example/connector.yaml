@@ -1,0 +1,21 @@
+connectorId: example
+generate:
+  javascriptSdk:
+    - outputDir: ..\..\src\dataconnect-generated
+      package: "@dataconnect/generated"
+      packageJsonDir: ..\..
+      react: false
+      angular: false
+    - outputDir: ..\..\smartstock\src\dataconnect-generated
+      package: "@dataconnect/generated"
+      packageJsonDir: ..\..\smartstock
+      react: false
+      angular: false
+    - outputDir: ..\..\functions\src\dataconnect-generated
+      package: "@dataconnect/generated"
+      packageJsonDir: ..\..\functions
+      react: false
+      angular: false
+  dartSdk:
+    - outputDir: ..\..\lib\dataconnect_generated
+      package: dataconnect_generated
