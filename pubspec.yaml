@@ -8,23 +8,29 @@ environment:
 dependencies:
   flutter:
     sdk: flutter
-  flutter_riverpod: any
-  firebase_core: any
-  cloud_firestore: any
-  firebase_auth: any
-  shared_preferences: any
-  share_plus: any
-  intl: any
-  firebase_data_connect: ^0.2.0+1
-  cloud_functions: ^5.0.4
-  
+  flutter_riverpod: ^2.5.1
+
+  # --- Firebase (família 4.x / 6.x) ---
+  firebase_core: ^4.1.1
+  cloud_firestore: ^6.0.0
+  firebase_auth: ^6.0.0
+  cloud_functions: ^6.0.2
+  firebase_data_connect: ^0.2.1
+
+  # --- Utilidades ---
+  shared_preferences: ^2.2.3
+  share_plus: ^12.0.0      # <-- apenas esta linha; remova qualquer outra 'share_plus'
+  intl: ^0.20.2
+  http: ^1.2.2
+  firebase_ai: ^3.3.0
+
 dev_dependencies:
   flutter_test:
     sdk: flutter
-  flutter_lints: any
+  flutter_lints: ^4.0.0
 
 flutter:
-    uses-material-design: true
-    assets:
+  uses-material-design: true
+  assets:
     - assets/brand/logo_black.png
     - assets/brand/logo_white.png

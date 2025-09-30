@@ -1,18 +1,15 @@
-import 'package:cloud_firestore/cloud_firestore.dart';
-
+// lib/data/models/product.dart
 class Product {
   final String id;
   final String nome;
-  final String categoria;
+  final String categoria; // sempre string (não-nula)
   final String? sku;
-  final double preco; // preço de venda
+  final double preco;
   final int quantidade;
   final int estoqueMinimo;
   final bool ativo;
-  final DateTime createdAt;
-  final DateTime updatedAt;
 
-  Product({
+  const Product({
     required this.id,
     required this.nome,
     required this.categoria,
@@ -21,46 +18,7 @@ class Product {
     required this.quantidade,
     required this.estoqueMinimo,
     required this.ativo,
-    required this.createdAt,
-    required this.updatedAt,
   });
-
-  factory Product.fromMap(String id, Map<String, dynamic> map) {
-    // compatibilidade com coleções antigas: 'valor'/'precoVenda'
-    final precoAny = map['preco'] ?? map['valor'] ?? map['precoVenda'] ?? 0.0;
-    final qtdAny = map['quantidade'] ?? map['Quantidade'] ?? 0;
-    final minAny = map['estoqueMinimo'] ?? map['EstoqueMinimo'] ?? 0;
-    final created = map['createdAt'];
-    final updated = map['updatedAt'];
-
-    return Product(
-      id: id,
-      nome: (map['nome'] ?? map['Nome'] ?? '').toString(),
-      categoria: (map['categoria'] ?? '').toString(),
-      sku: (map['sku'] as String?),
-      preco: precoAny is num
-          ? precoAny.toDouble()
-          : double.tryParse('$precoAny') ?? 0.0,
-      quantidade: qtdAny is num ? qtdAny.toInt() : int.tryParse('$qtdAny') ?? 0,
-      estoqueMinimo:
-          minAny is num ? minAny.toInt() : int.tryParse('$minAny') ?? 0,
-      ativo: map['ativo'] as bool? ?? true,
-      createdAt: created is Timestamp ? created.toDate() : DateTime.now(),
-      updatedAt: updated is Timestamp ? updated.toDate() : DateTime.now(),
-    );
-  }
-
-  Map<String, dynamic> toMap() => {
-        'nome': nome,
-        'categoria': categoria,
-        'sku': sku,
-        'preco': preco,
-        'quantidade': quantidade,
-        'estoqueMinimo': estoqueMinimo,
-        'ativo': ativo,
-        'createdAt': createdAt,
-        'updatedAt': updatedAt,
-      };
 
   Product copyWith({
     String? id,
@@ -71,20 +29,70 @@ class Product {
     int? quantidade,
     int? estoqueMinimo,
     bool? ativo,
-    DateTime? createdAt,
-    DateTime? updatedAt,
   }) {
     return Product(
       id: id ?? this.id,
       nome: nome ?? this.nome,
-      categoria: categoria ?? this.categoria,
+      categoria: (categoria ?? this.categoria),
       sku: sku ?? this.sku,
       preco: preco ?? this.preco,
       quantidade: quantidade ?? this.quantidade,
       estoqueMinimo: estoqueMinimo ?? this.estoqueMinimo,
       ativo: ativo ?? this.ativo,
-      createdAt: createdAt ?? this.createdAt,
-      updatedAt: updatedAt ?? this.updatedAt,
     );
+  }
+
+  /// Constrói a partir do Firestore (map cru)
+  static Product fromFirestore(String id, Map<String, dynamic> data) {
+    final precoAny = data['preco'];
+    final quantidadeAny = data['quantidade'];
+    final minimoAny = data['estoqueMinimo'];
+
+    return Product(
+      id: id,
+      nome: (data['nome'] ?? data['Nome'] ?? '').toString(),
+      categoria: (data['categoria'] ?? data['Categoria'] ?? '').toString(),
+      sku: (data['sku'] ?? data['SKU'])?.toString(),
+      preco: precoAny is num
+          ? precoAny.toDouble()
+          : double.tryParse('$precoAny') ?? 0.0,
+      quantidade: quantidadeAny is num
+          ? quantidadeAny.toInt()
+          : int.tryParse('$quantidadeAny') ?? 0,
+      estoqueMinimo: minimoAny is num
+          ? minimoAny.toInt()
+          : int.tryParse('$minimoAny') ?? 0,
+      ativo: data['ativo'] is bool ? data['ativo'] as bool : true,
+    );
+  }
+
+  /// Alias esperado por algumas telas: Product.fromMap(doc.id, doc.data())
+  static Product fromMap(String id, Map<String, dynamic> data) =>
+      fromFirestore(id, data);
+
+  Map<String, dynamic> toFirestore({
+    String? uid,
+    bool includeAuditCreate = false,
+    bool includeAuditUpdate = false,
+  }) {
+    final map = <String, dynamic>{
+      'nome': nome,
+      'nomeLower': nome.toLowerCase(),
+      'categoria': categoria,
+      'sku': sku ?? '',
+      'preco': preco,
+      'quantidade': quantidade,
+      'estoqueMinimo': estoqueMinimo,
+      'ativo': ativo,
+    };
+    if (includeAuditCreate) {
+      map['createdBy'] = uid;
+      // createdAt será setado como FieldValue.serverTimestamp() no datasource
+    }
+    if (includeAuditUpdate) {
+      map['updatedBy'] = uid;
+      // updatedAt também será setado no datasource
+    }
+    return map;
   }
 }

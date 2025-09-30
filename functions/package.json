@@ -1,32 +1,23 @@
 {
-  "name": "functions",
-  "description": "Cloud Functions for Firebase",
-  "scripts": {
-    "lint": "eslint .",
-    "serve": "firebase emulators:start --only functions",
-    "shell": "firebase functions:shell",
-    "start": "npm run shell",
-    "deploy": "firebase deploy --only functions",
-    "logs": "firebase functions:log"
-  },
-  "engines": {
-    "node": "22"
-  },
-  "main": "index.js",
-  "dependencies": {
-    "@dataconnect/generated": "file:src/dataconnect-generated",
-    "express": "^5.1.0",
-    "firebase-admin": "^12.6.0",
-    "firebase-functions": "^6.0.1",
-    "genkit": "^1.16.1",
-    "genkit-cli": "^1.16.1"
-  },
-  "devDependencies": {
-    "eslint": "^8.15.0",
-    "eslint-config-google": "^0.14.0",
-    "firebase-functions-test": "^3.1.0",
-    "tsx": "^4.20.4",
-    "typescript": "^5.9.2"
-  },
-  "private": true
+    "name": "functions",
+    "description": "Cloud Functions for Firebase",
+    "main": "lib/index.js",
+    "engines": {
+        "node": "18"
+    },
+    "scripts": {
+        "clean": "rimraf lib",
+        "build": "tsc",
+        "deploy": "npm run build && firebase deploy --only functions"
+    },
+    "dependencies": {
+        "@google-cloud/vertexai": "^1.10.0",
+        "firebase-admin": "^12.6.0",
+        "firebase-functions": "^6.0.1"
+    },
+    "devDependencies": {
+        "rimraf": "^6.0.1",
+        "typescript": "^5.9.2"
+    },
+    "private": true
 }
