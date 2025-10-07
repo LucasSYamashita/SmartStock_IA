@@ -2,15 +2,13 @@ import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-import 'package:smartstock_flutter_only/features/auth/auth_providers.dart';
 
 import 'features/home/dashboard_page.dart';
-import 'features/products/product_list_page.dart'
-    show ProductListPage, isAdminProvider;
+import 'features/products/product_list_page.dart' show ProductListPage;
 import 'features/chat/chat_page.dart';
 import 'features/auth/profile_page.dart';
 import 'features/settings/theme_mode_provider.dart';
-import 'features/tenant/tenant_provider.dart';
+import 'features/tenant/tenant_provider.dart'; // <- tenantIdProvider aqui
 import 'features/sales/manual_sale_flow.dart';
 
 class HomePage extends ConsumerStatefulWidget {
@@ -25,10 +23,9 @@ class _HomePageState extends ConsumerState<HomePage> {
   @override
   Widget build(BuildContext context) {
     final mode = ref.watch(themeModeProvider);
-    final tenantId = ref.watch(tenantIdProvider);
+    final tenantId = ref.watch(tenantIdProvider); // String (com fallback)
     final isAdmin = ref.watch(isAdminProvider); // bool
 
-    // Mantém estado das telas
     final pages = <Widget>[
       DashboardPage(onConsultarEstoque: () => setState(() => index = 1)),
       const ProductListPage(),
@@ -58,7 +55,7 @@ class _HomePageState extends ConsumerState<HomePage> {
 
     return Scaffold(
       appBar: AppBar(
-        title: Text('SmartStock${tenantId != null ? ' · $tenantId' : ''}'),
+        title: Text('SmartStock · $tenantId'),
         actions: [
           IconButton(
             tooltip: 'Alternar tema',
@@ -75,7 +72,8 @@ class _HomePageState extends ConsumerState<HomePage> {
             tooltip: 'Sair',
             icon: const Icon(Icons.logout),
             onPressed: () async {
-              await ref.read(tenantIdProvider.notifier).set(null);
+              // limpa tenant para o padrão e faz signout
+              ref.read(tenantIdProvider.notifier).clear();
               await FirebaseAuth.instance.signOut();
             },
           ),
@@ -113,7 +111,6 @@ class _HomePageState extends ConsumerState<HomePage> {
   }
 
   double _parsePreco(String raw) {
-    // aceita "12,34" ou "12.34"
     final s = raw
         .trim()
         .replaceAll('R\$', '')
@@ -137,8 +134,6 @@ class _HomePageState extends ConsumerState<HomePage> {
         builder: (ctx, setLocal) {
           Future<void> save() async {
             final tenantId = ref.read(tenantIdProvider);
-            if (tenantId == null) return;
-
             final nome = nameCtrl.text.trim();
             final marca = brandCtrl.text.trim();
             final quantidade = int.tryParse(qtdCtrl.text.trim()) ?? 0;
@@ -174,9 +169,8 @@ class _HomePageState extends ConsumerState<HomePage> {
 
               if (!context.mounted) return;
               Navigator.pop(context);
-              ScaffoldMessenger.of(
-                context,
-              ).showSnackBar(const SnackBar(content: Text('Produto criado.')));
+              ScaffoldMessenger.of(context).showSnackBar(
+                  const SnackBar(content: Text('Produto criado.')));
             } on FirebaseException catch (e) {
               setLocal(() => err = '${e.code}: ${e.message}');
             } catch (e) {

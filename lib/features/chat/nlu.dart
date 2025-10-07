@@ -13,23 +13,18 @@ class MoveIntent extends Intent {
   final int quantidade;
   final String produtoNome;
   final String? motivo;
-
   MoveIntent({
-    required String originalText,
+    required super.originalText,
     required this.tipo,
     required this.quantidade,
     required this.produtoNome,
     this.motivo,
-  }) : super(originalText);
+  });
 }
 
 class QueryIntent extends Intent {
   final String produtoNome;
-
-  QueryIntent({
-    required String originalText,
-    required this.produtoNome,
-  }) : super(originalText);
+  QueryIntent({required super.originalText, required this.produtoNome});
 }
 
 Intent? _tryMove(String text) {

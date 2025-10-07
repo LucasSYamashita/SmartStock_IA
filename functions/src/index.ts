@@ -1,31 +1,34 @@
+// functions/src/index.ts
 import * as functions from "firebase-functions/v1";
 import * as admin from "firebase-admin";
+import type { Request, Response } from "express";
 import { VertexAI } from "@google-cloud/vertexai";
 
-const REGION = "southamerica-east1";   // região das Cloud Functions
-const VERTEX_LOCATION = "us-central1"; // região do Vertex/Gemini (suporte amplo)
-const VERTEX_PROJECT =
-  process.env.GCLOUD_PROJECT ||
-  process.env.GCP_PROJECT ||
-  (process.env.FIREBASE_CONFIG && JSON.parse(process.env.FIREBASE_CONFIG).projectId) ||
-  "";
+// ====== CONFIG ======
+const REGION = "southamerica-east1";
 
+// Admin SDK
 if (!admin.apps.length) admin.initializeApp();
 const db = admin.firestore();
 
-const vertex = new VertexAI({ project: VERTEX_PROJECT, location: VERTEX_LOCATION });
+// Vertex config (usa ADC do Cloud Functions)
+const PROJECT_ID = process.env.GCLOUD_PROJECT || process.env.GCP_PROJECT || "";
+const VERTEX_LOCATION = "us-central1";
 
-// modelos
-const CHAT_MODEL   = "gemini-1.5-flash-002";
-const PARSER_MODEL = CHAT_MODEL;
+// Modelo (firebase functions:config:set gemini.model="gemini-2.5-flash")
+const CONFIG_MODEL = (functions.config().gemini && functions.config().gemini.model) || "";
+const CHAT_MODEL = CONFIG_MODEL || "gemini-2.5-flash";
 
-/* ---------------- HTTP/CORS utils ---------------- */
-function setCors(res: functions.Response) {
+const vertex = new VertexAI({ project: PROJECT_ID, location: VERTEX_LOCATION });
+const chatModel = vertex.getGenerativeModel({ model: CHAT_MODEL });
+
+// ====== HTTP utils ======
+function setCors(res: Response) {
   res.set("Access-Control-Allow-Origin", "*");
   res.set("Access-Control-Allow-Headers", "content-type,x-tenant-id,x-role,x-uid");
-  res.set("Access-Control-Allow-Methods", "POST, OPTIONS");
+  res.set("Access-Control-Allow-Methods", "POST,GET,OPTIONS");
 }
-function getAuthContext(req: functions.Request) {
+function getAuthContext(req: Request) {
   return {
     tenantId: (req.header("x-tenant-id") || "default").toString(),
     role: (req.header("x-role") || "viewer").toString(),
@@ -33,8 +36,15 @@ function getAuthContext(req: functions.Request) {
   };
 }
 
-/* ---------------- Firestore helpers ---------------- */
+// ====== Helpers Firestore ======
 type MoveType = "entrada" | "saida";
+
+function prodRef(t: string, p: string) {
+  return db.collection("tenants").doc(t).collection("produtos").doc(p);
+}
+function movCol(t: string) {
+  return db.collection("tenants").doc(t).collection("movimentos");
+}
 
 async function findProductByName(tenantId: string, name: string) {
   const lower = name.trim().toLowerCase();
@@ -43,28 +53,89 @@ async function findProductByName(tenantId: string, name: string) {
   let snap = await col.where("nomeLower", "==", lower).limit(1).get();
   if (!snap.empty) {
     const doc = snap.docs[0];
-    return { id: doc.id, ref: doc.ref, data: doc.data() as any };
+    const data = doc.data() as any;
+    if (!data.nomeLower && (data.nome || data.Nome)) {
+      await doc.ref.update({ nomeLower: String(data.nome ?? data.Nome).toLowerCase().trim() });
+    }
+    return { id: doc.id, ref: doc.ref, data };
   }
+
   snap = await col.where("nome", "==", name.trim()).limit(1).get();
   if (!snap.empty) {
     const doc = snap.docs[0];
-    return { id: doc.id, ref: doc.ref, data: doc.data() as any };
+    const data = doc.data() as any;
+    if (!data.nomeLower && (data.nome || data.Nome)) {
+      await doc.ref.update({ nomeLower: String(data.nome ?? data.Nome).toLowerCase().trim() });
+    }
+    return { id: doc.id, ref: doc.ref, data };
   }
+
+  try {
+    snap = await col
+      .orderBy("nomeLower")
+      .startAt([lower])
+      .endAt([`${lower}\uf8ff`])
+      .limit(1)
+      .get();
+    if (!snap.empty) {
+      const doc = snap.docs[0];
+      const data = doc.data() as any;
+      if (!data.nomeLower && (data.nome || data.Nome)) {
+        await doc.ref.update({ nomeLower: String(data.nome ?? data.Nome).toLowerCase().trim() });
+      }
+      return { id: doc.id, ref: doc.ref, data };
+    }
+  } catch {}
+
+  const sample = await col.limit(50).get();
+  for (const d of sample.docs) {
+    const data = d.data() as any;
+    const n = String(data.nome ?? data.Nome ?? "").toLowerCase().trim();
+    if (n === lower) {
+      if (!data.nomeLower && (data.nome || data.Nome)) {
+        await d.ref.update({ nomeLower: n });
+      }
+      return { id: d.id, ref: d.ref, data };
+    }
+  }
+
   return null;
 }
-function prodRef(t: string, p: string) {
-  return db.collection("tenants").doc(t).collection("produtos").doc(p);
-}
-function movCol(t: string) {
-  return db.collection("tenants").doc(t).collection("movimentos");
+
+async function ensureProduct(
+  tenantId: string,
+  name: string,
+  initialQty: number = 0
+) {
+  const existing = await findProductByName(tenantId, name);
+  if (existing) return { ...existing, created: false };
+
+  const col = db.collection("tenants").doc(tenantId).collection("produtos");
+  const doc = col.doc();
+  const now = admin.firestore.FieldValue.serverTimestamp();
+
+  const data = {
+    nome: name,
+    nomeLower: name.toLowerCase().trim(),
+    quantidade: Math.max(0, initialQty),
+    estoqueMinimo: 0,
+    preco: 0,
+    ativo: true,
+    createdAt: now,
+    updatedAt: now,
+    createdBy: "chat-act",
+  };
+  await doc.set(data);
+  return { id: doc.id, ref: doc, data, created: true as const };
 }
 
 async function executeAction(args: {
   tenantId: string; uid: string; role: string;
   acao: "entrada" | "saida" | "relatorio";
   produto: string; quantidade?: number; mes?: number;
+  allowCreateMissing?: boolean;
 }) {
-  const { tenantId, uid, role, acao, produto, quantidade, mes } = args;
+  const { tenantId, uid, role, acao, produto, quantidade, mes, allowCreateMissing } = args;
   if (!tenantId) throw new Error("tenantId obrigatório");
   if (!acao || !produto) throw new Error("acao e produto obrigatórios");
 
@@ -75,39 +146,81 @@ async function executeAction(args: {
     const q = Number(quantidade || 0);
     if (!Number.isFinite(q) || q <= 0) throw new Error("quantidade inválida.");
 
-    const prod = await findProductByName(tenantId, produto);
-    if (!prod) throw new Error(`Produto "${produto}" não encontrado.`);
+    if (acao === "entrada") {
+      // 👇 cria se não existir e se foi autorizado
+      const ensured = allowCreateMissing ? await ensureProduct(tenantId, produto, q) : await findProductByName(tenantId, produto);
+      const prod = ensured || await findProductByName(tenantId, produto);
+      if (!prod) throw new Error(`Produto "${produto}" não encontrado.`);
 
-    const pRef = prodRef(tenantId, prod.id);
-    const mRef = movCol(tenantId).doc();
+      const pRef = prodRef(tenantId, prod!.id);
+      const mRef = movCol(tenantId).doc();
 
-    await db.runTransaction(async (tx) => {
-      const snap = await tx.get(pRef);
-      if (!snap.exists) throw new Error("Produto inexistente");
-      const curr = Number((snap.data() as any)?.quantidade || 0);
-      const next = acao === "entrada" ? curr + q : curr - q;
-      if (next < 0) throw new Error(`Estoque insuficiente: atual=${curr}, saída=${q}`);
+      await db.runTransaction(async (tx) => {
+        const snap = await tx.get(pRef);
+        if (!snap.exists) throw new Error("Produto inexistente");
+        const curr = Number((snap.data() as any)?.quantidade ?? 0);
+        // se criou com initialQty=q, aqui ainda somamos q (estoque final = curr + q)
+        const next = curr + q;
 
-      tx.update(pRef, {
-        quantidade: next,
-        updatedAt: admin.firestore.FieldValue.serverTimestamp(),
-        updatedBy: uid,
+        tx.update(pRef, {
+          quantidade: next,
+          updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+          updatedBy: uid,
+        });
+        tx.set(mRef, {
+          tipo: acao,
+          produtoId: prod!.id,
+          usuarioId: uid,
+          quantidade: q,
+          motivo: "compra",
+          origem: "chat",
+          createdAt: admin.firestore.FieldValue.serverTimestamp(),
+        });
       });
-      tx.set(mRef, {
-        tipo: acao,
-        produtoId: prod.id,
-        usuarioId: uid,
-        quantidade: q,
-        motivo: acao === "entrada" ? "compra" : "venda",
-        origem: "chat",
-        createdAt: admin.firestore.FieldValue.serverTimestamp(),
-      });
-    });
 
-    return {
-      ok: true,
-      message: `✅ ${acao} de ${q} un. no produto "${prod.data.nome || produto}" registrada.`,
-    };
+      return {
+        ok: true,
+        created: (ensured as any)?.created ?? false,
+        message: (ensured as any)?.created
+          ? `🆕 Produto "${produto}" criado e entrada de ${q} un. registrada.`
+          : `✅ entrada de ${q} un. no produto "${produto}" registrada.`,
+      };
+    }
+
+    if (acao === "saida") {
+      const prod = await findProductByName(tenantId, produto);
+      if (!prod) throw new Error(`Produto "${produto}" não encontrado.`);
+      const pRef = prodRef(tenantId, prod.id);
+      const mRef = movCol(tenantId).doc();
+
+      await db.runTransaction(async (tx) => {
+        const snap = await tx.get(pRef);
+        if (!snap.exists) throw new Error("Produto inexistente");
+        const curr = Number((snap.data() as any)?.quantidade ?? 0);
+        const next = curr - q;
+        if (next < 0) throw new Error(`Estoque insuficiente: atual=${curr}, saída=${q}`);
+
+        tx.update(pRef, {
+          quantidade: next,
+          updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+          updatedBy: uid,
+        });
+        tx.set(mRef, {
+          tipo: acao,
+          produtoId: prod.id,
+          usuarioId: uid,
+          quantidade: q,
+          motivo: "venda",
+          origem: "chat",
+          createdAt: admin.firestore.FieldValue.serverTimestamp(),
+        });
+      });
+
+      return {
+        ok: true,
+        message: `✅ saída de ${q} un. no produto "${produto}" registrada.`,
+      };
+    }
   }
 
   if (acao === "relatorio") {
@@ -119,7 +232,7 @@ async function executeAction(args: {
     if (!prod) throw new Error(`Produto "${produto}" não encontrado.`);
 
     const start = admin.firestore.Timestamp.fromDate(new Date(y, m - 1, 1));
-    const end   = admin.firestore.Timestamp.fromDate(new Date(y, m, 1));
+    const end = admin.firestore.Timestamp.fromDate(new Date(y, m, 1));
 
     const qSnap = await movCol(tenantId)
       .where("produtoId", "==", prod.id)
@@ -135,11 +248,11 @@ async function executeAction(args: {
     });
 
     const pSnap = await prodRef(tenantId, prod.id).get();
-    const saldo = pSnap.exists ? Number((pSnap.data() as any)?.quantidade || 0) : 0;
+    const saldo = pSnap.exists ? Number((pSnap.data() as any)?.quantidade ?? (pSnap.data() as any)?.Quantidade ?? 0) : 0;
 
     return {
       ok: true,
-      message: `Relatório ${prod.data.nome || produto} - ${String(m).padStart(2,"0")}/${y}: entradas=${entradas}, saídas=${saidas}, saldo=${saldo}.`,
+      message: `Relatório ${(prod.data?.nome ?? prod.data?.Nome ?? produto)} - ${String(m).padStart(2,"0")}/${y}: entradas=${entradas}, saídas=${saidas}, saldo=${saldo}.`,
       month: m, year: y, entradas, saidas, saldo,
     };
   }
@@ -147,118 +260,142 @@ async function executeAction(args: {
   throw new Error(`Ação desconhecida: ${acao}`);
 }
 
-/* ---------------- Vertex helpers ---------------- */
-async function vertexGenerateText(model: string, prompt: string): Promise<string> {
-  const gen = vertex.getGenerativeModel({ model });
-  const result = await gen.generateContent({
-    contents: [{ role: "user", parts: [{ text: prompt }]}],
-    generationConfig: { temperature: 0.3 },
-  });
-  return result.response.candidates?.[0]?.content?.parts
-    ?.map((p: any) => p?.text || "")
-    .join("") || "";
+// ====== LLM helpers ======
+function buildChatPrompt(system: string | undefined, messages: Array<{role:"user"|"assistant"|"system"; content:string}>) {
+  const lines: string[] = [];
+  if (system && system.trim()) lines.push(`SYSTEM:\n${system.trim()}`);
+  for (const m of messages) lines.push(`${m.role}: ${m.content}`);
+  return lines.join("\n");
+}
+function parseJsonLoose(raw: string): any {
+  let s = (raw || "").trim();
+  if (s.startsWith("```")) {
+    s = s.replace(/^```[a-zA-Z]*\n?/, "").replace(/```$/, "").trim();
+  }
+  if (s.toLowerCase().startsWith("json")) s = s.substring(4).trim();
+  return JSON.parse(s);
 }
 
-async function vertexGenerateJson(model: string, userText: string, system: string, schema: any): Promise<any> {
-  const gen = vertex.getGenerativeModel({ model });
-  const result = await gen.generateContent({
-    contents: [
-      { role: "user", parts: [{ text: `SYSTEM:\n${system}` }] },
-      { role: "user", parts: [{ text: userText }] },
-    ],
-    generationConfig: {
-      temperature: 0,
-      responseMimeType: "application/json",
-      responseSchema: schema,
-    },
-  });
-  const txt = result.response.candidates?.[0]?.content?.parts
-    ?.map((p: any) => p?.text || "")
-    .join("") || "{}";
-  return JSON.parse(txt);
-}
+// ====== Endpoints ======
 
-/* ---------------- 1) CHAT (HTTP) ---------------- */
-export const chat = functions.region(REGION).https.onRequest(async (req, res) => {
-  if (req.method === "OPTIONS") { setCors(res); res.status(204).send(""); return; }
+// Diagnóstico
+export const diag = functions.region(REGION).https.onRequest(async (_req, res) => {
+  setCors(res);
+  res.status(200).json({
+    project: PROJECT_ID,
+    location: VERTEX_LOCATION,
+    runningModel: CHAT_MODEL,
+    configModel: CONFIG_MODEL || null,
+  });
+});
+
+// Chat livre
+export const chat = functions.region(REGION).https.onRequest(async (req: Request, res: Response) => {
+  if (req.method === "OPTIONS") { setCors(res); return res.status(204).send(""); }
   setCors(res);
 
-  const body = (req.body || {}) as {
-    messages?: Array<{ role: "user"|"assistant"|"system"; content: string }>;
-    system?: string;
-  };
-  const { messages = [], system } = body;
-  const auth = getAuthContext(req);
-
-  const baseSys = `Você é o assistente do SmartStock (tenant=${auth.tenantId}, role=${auth.role}).
-Responda claro e objetivo. Quando fizer sentido, proponha JSON {acao:"entrada|saida|relatorio", produto, quantidade:int, mes?:int}.`;
-
-  const prompt = [
-    baseSys,
-    system ? `\n${system}` : "",
-    "\n\n",
-    messages.map(m => `${m.role}: ${m.content}`).join("\n") || "Olá"
-  ].join("");
-
   try {
-    const text = await vertexGenerateText(CHAT_MODEL, prompt);
-    res.status(200).json({ text });
+    const { messages = [], system } = (req.body || {}) as {
+      messages?: Array<{ role: "user" | "assistant" | "system"; content: string; }>;
+      system?: string;
+    };
+    const auth = getAuthContext(req);
+    const baseSys = `Você é o assistente do SmartStock (tenant=${auth.tenantId}, role=${auth.role}). Seja objetivo.`;
+
+    const prompt = buildChatPrompt(system ? `${baseSys}\n${system}` : baseSys, messages);
+
+    const resp = await chatModel.generateContent({
+      contents: [{ role: "user", parts: [{ text: prompt || "Olá" }] } ],
+    });
+
+    const text = resp?.response?.candidates?.[0]?.content?.parts?.map((p: any) => p?.text || "").join("") || "";
+    return res.status(200).json({ text });
   } catch (e: any) {
-    res.status(500).json({ error: String(e?.message || e) });
+    return res.status(500).json({ error: String(e?.message || e) });
   }
 });
 
-/* ---------------- 2) ACT (HTTP) ---------------- */
-export const act = functions.region(REGION).https.onRequest(async (req, res) => {
-  if (req.method === "OPTIONS") { setCors(res); res.status(204).send(""); return; }
+// Interpretar & Executar (dryRun/confirm/createIfMissing)
+export const act = functions.region(REGION).https.onRequest(async (req: Request, res: Response) => {
+  if (req.method === "OPTIONS") { setCors(res); return res.status(204).send(""); }
   setCors(res);
 
-  const body = (req.body || {}) as {
-    messages?: Array<{ role: "user"|"assistant"|"system"; content: string }>;
-    system?: string;
-  };
-  const { messages = [], system } = body;
-  const { tenantId, role, uid } = getAuthContext(req);
-
-  const parserPrompt = `Você é o parser do SmartStock. Retorne SOMENTE JSON válido e enxuto.
-Campos: { acao:"entrada|saida|relatorio", produto:string, quantidade?:int>0, mes?:1-12 }.
-Se faltar quantidade, não crie entrada/saida.`;
-
-  const schema = {
-    type: "object",
-    properties: {
-      acao: { type: "string", enum: ["entrada","saida","relatorio"] },
-      produto: { type: "string" },
-      quantidade: { type: "integer" },
-      mes: { type: "integer" },
-    },
-    required: ["acao","produto"],
-    additionalProperties: false,
-  };
+  const dryRun = String(req.query?.dryRun ?? "true") === "true";
+  const confirm = String(req.query?.confirm ?? "false") === "true";
+  // 👇 NOVO: habilita criação automática de produto quando acao=entrada
+  const createIfMissing = String(req.query?.createIfMissing ?? "false") === "true";
 
   try {
-    const textAll = messages.map(m => `${m.role}: ${m.content}`).join("\n") || "Olá";
-    const parsed = await vertexGenerateJson(
-      PARSER_MODEL,
-      textAll,
-      system ? `${parserPrompt}\n${system}` : parserPrompt,
-      schema
-    );
+    const { messages = [], system } = (req.body || {}) as {
+      messages?: Array<{ role: "user" | "assistant" | "system"; content: string; }>;
+      system?: string;
+    };
+    const { tenantId, role, uid } = getAuthContext(req);
+
+    const parserSys = `Você é o parser do SmartStock. Responda SOMENTE JSON puro.
+Schema:
+{
+  "acao": "entrada"|"saida"|"relatorio",
+  "produto": "string",
+  "quantidade": "int opcional (>0)",
+  "mes": "int opcional (1..12)"
+}
+Se faltar quantidade, não crie entrada/saida.`;
+    const prompt = buildChatPrompt(system ? `${parserSys}\n${system}` : parserSys, messages);
+
+    const r = await chatModel.generateContent({
+      contents: [{ role: "user", parts: [{ text: prompt }] }],
+    });
+
+    const raw = r?.response?.candidates?.[0]?.content?.parts?.map((p: any) => p?.text || "").join("") || "{}";
+
+    let parsed: any;
+    try {
+      parsed = parseJsonLoose(raw);
+    } catch {
+      return res.status(400).json({ ok: false, error: "Resposta não-JSON do parser.", raw });
+    }
 
     const { acao, produto, quantidade, mes } = parsed || {};
     if (!acao || !produto) {
-      res.status(400).json({ ok:false, error:"Interpretação incompleta.", parsed });
-      return;
+      return res.status(400).json({ ok: false, error: "Interpretação incompleta.", parsed, raw });
     }
 
-    const exec = await executeAction({ tenantId, uid, role, acao, produto, quantidade, mes });
-    res.status(200).json({ ok:true, parsed, result: exec, assistant_text: exec.message });
+    if (dryRun) {
+      const txt = acao === "relatorio"
+        ? `Proposta: relatório do produto "${produto}" (mês: ${mes ?? "atual"}). Confirma?`
+        : `Proposta: ${acao} de ${quantidade ?? "??"} un. em "${produto}". Confirma?`;
+      return res.status(200).json({ ok: true, parsed, assistant_text: txt, dryRun: true });
+    }
+
+    if (!confirm) {
+      return res.status(400).json({
+        ok: false,
+        error: "Confirmação ausente. Chame com ?confirm=true para executar.",
+        parsed,
+      });
+    }
+
+    // 👇 Passa createIfMissing para a execução
+    const exec = await executeAction({
+      tenantId, uid, role, acao, produto, quantidade, mes,
+      allowCreateMissing: createIfMissing,
+    });
+
+    return res.status(200).json({
+      ok: true,
+      parsed,
+      result: exec,
+      assistant_text: exec.message,
+      dryRun: false,
+      confirm: true,
+    });
   } catch (e: any) {
-    res.status(500).json({ ok:false, error: String(e?.message || e) });
+    return res.status(500).json({ ok: false, error: String(e?.message || e) });
   }
 });
 
-/* ---------------- 3) parseStockCommand (Callable) ---------------- */
+// parseStockCommand (callable)
 export const parseStockCommand = functions.region(REGION).https.onCall(async (data, context) => {
   if (!context.auth) throw new functions.https.HttpsError("unauthenticated", "Faça login.");
 
@@ -266,35 +403,26 @@ export const parseStockCommand = functions.region(REGION).https.onCall(async (da
   const locale = String(data?.locale ?? "pt-BR");
   if (!text) throw new functions.https.HttpsError("invalid-argument", "Campo 'text' é obrigatório.");
 
-  const system =
-`Você é um parser de comandos de estoque. Responda SOMENTE JSON válido no schema abaixo.
-Objetivo: dado um texto em ${locale}, detectar zero ou mais operações:
-{ tipo:"entrada"|"saida", quantidade:int>0, produtoNome:string, motivo?:string }
-Regra: não invente quantidades; se faltar, não crie operação.`;
+  const sys =
+`Você é um parser de comandos de estoque. Responda SOMENTE JSON válido:
+{
+  "operations": [
+    {"tipo":"entrada"|"saida","quantidade":int>0,"produtoNome":"string","motivo":"string opcional"}
+  ]
+}
+Idioma: ${locale}. Não invente quantidade.`;
 
-  const schema = {
-    type: "object",
-    properties: {
-      operations: {
-        type: "array",
-        items: {
-          type: "object",
-          properties: {
-            tipo: { type: "string", enum: ["entrada","saida"] },
-            quantidade: { type: "integer", minimum: 1 },
-            produtoNome: { type: "string", minLength: 1 },
-            motivo: { type: "string" },
-          },
-          required: ["tipo","quantidade","produtoNome"],
-          additionalProperties: false,
-        },
-      },
-    },
-    required: ["operations"],
-    additionalProperties: false,
-  };
+  const resp = await chatModel.generateContent({
+    contents: [{ role: "user", parts: [{ text: `SYSTEM:\n${sys}\n\nUSER:\n${text}` }]}],
+  });
 
-  const out = await vertexGenerateJson(PARSER_MODEL, text, system, schema);
+  const raw = resp?.response?.candidates?.[0]?.content?.parts?.map((p: any) => p?.text || "").join("") || "{}";
+  let out: any;
+  try {
+    out = parseJsonLoose(raw);
+  } catch {
+    throw new functions.https.HttpsError("internal", "Resposta não-JSON da IA.");
+  }
 
   const ops = Array.isArray(out?.operations) ? out.operations : [];
   const clean = ops
@@ -311,4 +439,34 @@ Regra: não invente quantidades; se faltar, não crie operação.`;
     }));
 
   return { operations: clean };
+});
+
+// whoami
+export const whoami = functions.region(REGION).https.onRequest(async (_req, res) => {
+  res.set("Access-Control-Allow-Origin", "*");
+  res.json({
+    projectId: process.env.GCLOUD_PROJECT || process.env.GCP_PROJECT,
+    serviceAccountEmail: process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL || "unknown",
+    firestoreDbPath: `projects/${process.env.GCLOUD_PROJECT}/databases/(default)`,
+  });
+});
+
+// probe
+export const firestoreProbe = functions.region(REGION).https.onRequest(async (req, res) => {
+  res.set("Access-Control-Allow-Origin", "*");
+  try {
+    const tenant = (req.query.tenantId as string) || "TENANT01";
+    const ref = admin.firestore()
+      .collection("tenants").doc(tenant)
+      .collection("__diag__").doc("probe");
+    await ref.set({
+      wroteAt: admin.firestore.FieldValue.serverTimestamp(),
+      note: "probe from Cloud Function",
+    }, { merge: true });
+
+    const snap = await ref.get();
+    res.json({ ok: true, wrote: snap.exists, data: snap.data() });
+  } catch (e: any) {
+    res.status(500).json({ ok: false, error: String(e?.message || e), stack: e?.stack });
+  }
 });

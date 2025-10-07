@@ -1,96 +1,91 @@
-// lib/features/chat/chat_service.dart
 import 'dart:async';
 import 'dart:convert';
 import 'package:http/http.dart' as http;
-import '../../core/env.dart';
+
+/// Ajuste para sua região/projeto
+const _kRegion = 'southamerica-east1';
+const _kProject = 'smartstock-ae7ad';
+const String kFunctionsBaseUrl =
+    'https://$_kRegion-$_kProject.cloudfunctions.net';
 
 class ChatService {
   const ChatService();
 
-  Uri _chatUri({required bool stream}) =>
-      Uri.parse('$kFunctionsBase/chat?stream=$stream');
-
-  Uri get _actUri => Uri.parse('$kFunctionsBase/act');
-
+  /// Chat “livre”: não mexe em estoque, só responde texto.
   Future<String> chatOnce({
     required List<Map<String, String>> history,
-    String tenantId = 'TENANT01',
-    String role = 'staff',
-    String uid = 'teste',
+    String? system,
   }) async {
-    final r = await http.post(
-      _chatUri(stream: false),
-      headers: {
-        'content-type': 'application/json',
-        'x-tenant-id': tenantId,
-        'x-role': role,
-        'x-uid': uid,
-      },
-      body: jsonEncode({'messages': history}),
+    final uri = Uri.parse('$kFunctionsBaseUrl/chat?stream=false');
+
+    final resp = await http.post(
+      uri,
+      headers: {'Content-Type': 'application/json'},
+      body: jsonEncode({
+        'messages': history,
+        if (system != null) 'system': system,
+      }),
     );
-    if (r.statusCode != 200) {
-      throw Exception('HTTP ${r.statusCode}: ${r.body}');
+
+    if (resp.statusCode != 200) {
+      throw Exception('HTTP ${resp.statusCode}: ${resp.body}');
     }
-    final json = jsonDecode(r.body) as Map<String, dynamic>;
+    final json = jsonDecode(resp.body) as Map<String, dynamic>;
     return (json['text'] ?? '').toString();
   }
 
-  Stream<String> chatStream({
-    required List<Map<String, String>> history,
-    String tenantId = 'TENANT01',
-    String role = 'staff',
-    String uid = 'teste',
-  }) async* {
-    final req = http.Request('POST', _chatUri(stream: true));
-    req.headers.addAll({
-      'content-type': 'application/json',
-      'x-tenant-id': tenantId,
-      'x-role': role,
-      'x-uid': uid,
-    });
-    req.body = jsonEncode({'messages': history});
-
-    final resp = await req.send();
-    if (resp.statusCode != 200) {
-      final body = await resp.stream.bytesToString();
-      throw Exception('HTTP ${resp.statusCode}: $body');
-    }
-
-    final lines =
-        resp.stream.transform(utf8.decoder).transform(const LineSplitter());
-    await for (final line in lines) {
-      if (line.startsWith('data: ')) {
-        final payload = line.substring(6).trim();
-        if (payload == '[DONE]') break;
-        try {
-          final json = jsonDecode(payload) as Map<String, dynamic>;
-          final delta = (json['delta'] ?? '').toString();
-          if (delta.isNotEmpty) yield delta;
-        } catch (_) {}
-      }
-    }
+  /// Stream de chat (SSE _simulado_ pelo endpoint; se não usar stream, pode remover)
+  Stream<String> chatStream(
+      {required List<Map<String, String>> history}) async* {
+    // Mantive só como exemplo, chamando o mesmo endpoint “once”.
+    // Se quiser SSE real, troque para /chat?stream=true no back e faça parsing de Server-Sent Events.
+    final txt = await chatOnce(history: history);
+    yield txt;
   }
 
+  /// Interpreta e opcionalmente executa (dryRun/confirm), com tenant/role/uid nos headers
   Future<Map<String, dynamic>> act({
     required List<Map<String, String>> messages,
-    String tenantId = 'TENANT01',
-    String role = 'staff',
-    String uid = 'teste',
+    required String tenantId,
+    required String role,
+    required String uid,
+    bool dryRun = true,
+    bool confirm = false,
+    bool createIfMissing = false,
+    String? system,
   }) async {
-    final r = await http.post(
-      _actUri,
-      headers: {
-        'content-type': 'application/json',
-        'x-tenant-id': tenantId,
-        'x-role': role,
-        'x-uid': uid,
-      },
-      body: jsonEncode({'messages': messages}),
+    final uri = Uri.parse(
+      '$kFunctionsBaseUrl/act?dryRun=$dryRun&confirm=$confirm&createIfMissing=$createIfMissing',
     );
-    final txt = r.body;
-    if (r.statusCode != 200) {
-      throw Exception('HTTP ${r.statusCode}: $txt');
+
+    final headers = {
+      'Content-Type': 'application/json',
+      'x-tenant-id': tenantId,
+      'x-role': role, // "staff" | "admin" | "viewer"
+      'x-uid': uid,
+    };
+
+    final resp = await http.post(
+      uri,
+      headers: headers,
+      body: jsonEncode({
+        'messages': messages,
+        if (system != null) 'system': system,
+      }),
+    );
+
+    final bodyText = resp.body;
+    Map<String, dynamic> json;
+    try {
+      json = jsonDecode(bodyText) as Map<String, dynamic>;
+    } catch (_) {
+      throw Exception('HTTP ${resp.statusCode}: $bodyText');
     }
-    return jsonDecode(txt) as Map<String, dynamic>;
+
+    if (resp.statusCode != 200) {
+      final err = (json['error'] ?? bodyText).toString();
+      throw Exception(err);
+    }
+    return json;
   }
 }

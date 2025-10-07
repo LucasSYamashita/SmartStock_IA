@@ -1,2 +1,9 @@
 node_modules/
-*.local
+lib/
+dist/
+.npmrc
+.env
+.env.*
+firebase-debug.log
+firebase-debug.*
+.serviceAccount*.json
