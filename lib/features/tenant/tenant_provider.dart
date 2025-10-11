@@ -1,30 +1,39 @@
 // lib/features/tenant/tenant_provider.dart
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'membership.dart';
 
-const _kTenantKey = 'selected_tenant_id';
+final tenantIdProvider =
+    StateNotifierProvider<TenantIdNotifier, String?>((ref) {
+  return TenantIdNotifier();
+});
 
-final tenantIdProvider = StateNotifierProvider<TenantController, String?>(
-  (ref) => TenantController()..load(),
-);
-
-class TenantController extends StateNotifier<String?> {
-  TenantController() : super(null);
-
-  Future<void> load() async {
-    final sp = await SharedPreferences.getInstance();
-    state = sp.getString(_kTenantKey);
+class TenantIdNotifier extends StateNotifier<String?> {
+  TenantIdNotifier() : super(null) {
+    _load();
   }
 
-  Future<void> set(String tenantId) async {
+  Future<void> _load() async {
+    final prefs = await SharedPreferences.getInstance();
+    final v = prefs.getString('tenantId');
+    state = v;
+  }
+
+  Future<void> set(String? tenantId) async {
+    final prefs = await SharedPreferences.getInstance();
+    if (tenantId == null || tenantId.isEmpty) {
+      await prefs.remove('tenantId');
+      state = null;
+      return;
+    }
+    await prefs.setString('tenantId', tenantId);
     state = tenantId;
-    final sp = await SharedPreferences.getInstance();
-    await sp.setString(_kTenantKey, tenantId);
+
+    // 🔴 fundamental: garante membership assim que seleciona/entra na loja
+    try {
+      await ensureMembership(tenantId);
+    } catch (_) {/* evita quebrar UI */}
   }
 
-  Future<void> clear() async {
-    state = null;
-    final sp = await SharedPreferences.getInstance();
-    await sp.remove(_kTenantKey);
-  }
+  Future<void> clear() => set(null);
 }

@@ -4,6 +4,7 @@ import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+
 import 'tenant_provider.dart';
 
 class TenantJoinCreatePage extends ConsumerStatefulWidget {
@@ -34,94 +35,102 @@ class _TenantJoinCreatePageState extends ConsumerState<TenantJoinCreatePage> {
   }
 
   Future<void> _joinByCode() async {
-    setState(() {
-      _working = true;
-      _err = null;
-      _ok = null;
-    });
+    if (mounted) {
+      setState(() {
+        _working = true;
+        _err = null;
+        _ok = null;
+      });
+    }
 
     try {
       final code = _joinCode.text.trim().toUpperCase();
       if (code.isEmpty) {
-        setState(() => _err = 'Informe um código.');
+        if (mounted) setState(() => _err = 'Informe um código.');
         return;
       }
 
       final db = FirebaseFirestore.instance;
       String? tenantId;
 
-      // 1) Primeiro tenta direto em /tenants pelo campo 'code'
-      final snapTenants = await db
+      // 1) tenta /tenants pelo campo 'code'
+      final byTenants = await db
           .collection('tenants')
           .where('code', isEqualTo: code)
           .limit(1)
           .get();
-      if (snapTenants.docs.isNotEmpty) {
-        tenantId = snapTenants.docs.first.id;
+      if (byTenants.docs.isNotEmpty) {
+        tenantId = byTenants.docs.first.id;
       } else {
-        // 2) Fallback: /tenant_codes (se você ainda usa esse alias)
-        final snapCodes = await db
+        // 2) fallback /tenant_codes
+        final byCodes = await db
             .collection('tenant_codes')
             .where('code', isEqualTo: code)
             .limit(1)
             .get();
-        if (snapCodes.docs.isNotEmpty) {
-          tenantId = (snapCodes.docs.first.data()['tenantId'] ?? '').toString();
+        if (byCodes.docs.isNotEmpty) {
+          tenantId = (byCodes.docs.first.data()['tenantId'] ?? '').toString();
         }
       }
 
       if (tenantId == null || tenantId.isEmpty) {
-        setState(() => _err = 'Código inválido.');
+        if (mounted) setState(() => _err = 'Código inválido.');
         return;
       }
 
-      final uid = FirebaseAuth.instance.currentUser!.uid;
-
-      // Cria/atualiza membership do próprio usuário como 'staff'
+      final me = FirebaseAuth.instance.currentUser!;
+      // cria/atualiza membership como staff (join por código)
       await db
           .collection('tenants')
           .doc(tenantId)
           .collection('usuarios')
-          .doc(uid)
+          .doc(me.uid)
           .set({
         'role': 'staff',
         'active': true,
-        'displayName': FirebaseAuth.instance.currentUser?.displayName ?? '',
-        'email': FirebaseAuth.instance.currentUser?.email ?? '',
+        'displayName': me.displayName ?? '',
+        'email': me.email ?? '',
         'joinedAt': FieldValue.serverTimestamp(),
       }, SetOptions(merge: true));
 
-      // Salva seleção local
       await ref.read(tenantIdProvider.notifier).set(tenantId);
 
-      setState(() => _ok = 'Você entrou na loja.');
+      if (!mounted) return;
+      setState(() {
+        _ok = 'Você entrou na loja.';
+        _working = false;
+      });
+      // Se esta página for modal, você pode fechar aqui:
+      // Navigator.pop(context);
     } on FirebaseException catch (e) {
-      setState(() => _err = '${e.code}: ${e.message}');
+      if (mounted) setState(() => _err = '(${e.code}) ${e.message}');
     } catch (e) {
-      setState(() => _err = e.toString());
+      if (mounted) setState(() => _err = e.toString());
     } finally {
       if (mounted) setState(() => _working = false);
     }
   }
 
   Future<void> _createTenant() async {
-    setState(() {
-      _working = true;
-      _err = null;
-      _ok = null;
-    });
+    if (mounted) {
+      setState(() {
+        _working = true;
+        _err = null;
+        _ok = null;
+      });
+    }
 
     try {
       final name = _nameCtrl.text.trim();
       if (name.isEmpty) {
-        setState(() => _err = 'Informe o nome da loja.');
+        if (mounted) setState(() => _err = 'Informe o nome da loja.');
         return;
       }
 
       final db = FirebaseFirestore.instance;
       final uid = FirebaseAuth.instance.currentUser!.uid;
 
-      // Gera code curto e garante unicidade básica em /tenants
+      // garante um 'code' único básico
       String code = _genCode();
       for (int i = 0; i < 6; i++) {
         final exists = await db
@@ -133,16 +142,16 @@ class _TenantJoinCreatePageState extends ConsumerState<TenantJoinCreatePage> {
         code = _genCode();
       }
 
-      // Cria tenant com TODOS os campos exigidos pelas rules
+      // cria tenant com campos esperados pelas rules
       final tRef = await db.collection('tenants').add({
         'name': name,
         'code': code,
-        'createdBy': uid, // obrigatório p/ rule de create
+        'createdBy': uid,
         'createdAt': FieldValue.serverTimestamp(),
         'updatedAt': FieldValue.serverTimestamp(),
       });
 
-      // Criador vira admin
+      // criador vira admin
       await tRef.collection('usuarios').doc(uid).set({
         'role': 'admin',
         'active': true,
@@ -151,7 +160,7 @@ class _TenantJoinCreatePageState extends ConsumerState<TenantJoinCreatePage> {
         'joinedAt': FieldValue.serverTimestamp(),
       }, SetOptions(merge: true));
 
-      // (Opcional) cria alias em /tenant_codes — útil pra compartilhar
+      // alias em /tenant_codes (best-effort)
       try {
         await db.collection('tenant_codes').add({
           'code': code,
@@ -159,18 +168,21 @@ class _TenantJoinCreatePageState extends ConsumerState<TenantJoinCreatePage> {
           'createdAt': FieldValue.serverTimestamp(),
           'createdBy': uid,
         });
-      } catch (_) {
-        // se a coleção não existir / regra bloquear, não quebra o fluxo principal
-      }
+      } catch (_) {}
 
-      // Salva tenant selecionado
       await ref.read(tenantIdProvider.notifier).set(tRef.id);
 
-      setState(() => _ok = 'Loja criada. Código de convite: $code');
+      if (!mounted) return;
+      setState(() {
+        _ok = 'Loja criada. Código de convite: $code';
+        _working = false;
+      });
+      // Se for modal, pode fechar:
+      // Navigator.pop(context);
     } on FirebaseException catch (e) {
-      setState(() => _err = '(${e.code}) ${e.message}');
+      if (mounted) setState(() => _err = '(${e.code}) ${e.message}');
     } catch (e) {
-      setState(() => _err = e.toString());
+      if (mounted) setState(() => _err = e.toString());
     } finally {
       if (mounted) setState(() => _working = false);
     }

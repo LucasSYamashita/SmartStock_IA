@@ -2,7 +2,7 @@
 class Product {
   final String id;
   final String nome;
-  final String categoria; // sempre string (não-nula)
+  final String categoria; // string obrigatória
   final String? sku;
   final double preco;
   final int quantidade;
@@ -44,9 +44,9 @@ class Product {
 
   /// Constrói a partir do Firestore (map cru)
   static Product fromFirestore(String id, Map<String, dynamic> data) {
-    final precoAny = data['preco'];
-    final quantidadeAny = data['quantidade'];
-    final minimoAny = data['estoqueMinimo'];
+    final precoAny = data['preco'] ?? data['valor'] ?? 0;
+    final quantidadeAny = data['quantidade'] ?? 0;
+    final minimoAny = data['estoqueMinimo'] ?? 0;
 
     return Product(
       id: id,
@@ -66,7 +66,7 @@ class Product {
     );
   }
 
-  /// Alias esperado por algumas telas: Product.fromMap(doc.id, doc.data())
+  /// Alias usado por telas antigas
   static Product fromMap(String id, Map<String, dynamic> data) =>
       fromFirestore(id, data);
 
@@ -87,11 +87,9 @@ class Product {
     };
     if (includeAuditCreate) {
       map['createdBy'] = uid;
-      // createdAt será setado como FieldValue.serverTimestamp() no datasource
     }
     if (includeAuditUpdate) {
       map['updatedBy'] = uid;
-      // updatedAt também será setado no datasource
     }
     return map;
   }

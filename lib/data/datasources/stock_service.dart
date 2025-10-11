@@ -1,223 +1,192 @@
 import 'package:cloud_firestore/cloud_firestore.dart';
-import 'dart:math';
+import 'package:firebase_auth/firebase_auth.dart';
 
+/// Linhas de venda (saída de estoque)
 class SaleLine {
   final String produtoId;
   final int qty;
-  final double? unitPrice;
-  const SaleLine({required this.produtoId, required this.qty, this.unitPrice});
+  final double unitPrice;
+  const SaleLine(
+      {required this.produtoId, required this.qty, required this.unitPrice});
 }
 
+/// Linhas de entrada/compra (entrada de estoque)
 class InboundLine {
   final String produtoId;
   final int qty;
-  final double? unitCost;
-  const InboundLine({
-    required this.produtoId,
-    required this.qty,
-    this.unitCost,
-  });
+  final double unitCost;
+  const InboundLine(
+      {required this.produtoId, required this.qty, required this.unitCost});
 }
 
-/// Serviço de estoque: aplica entrada, saída (venda) e ajuste dentro de transações.
 class StockService {
   final FirebaseFirestore db;
   final String tenantId;
   StockService(this.db, this.tenantId);
 
-  CollectionReference<Map<String, dynamic>> get _prodCol =>
-      db.collection('tenants').doc(tenantId).collection('produtos');
-  CollectionReference<Map<String, dynamic>> get _movCol =>
-      db.collection('tenants').doc(tenantId).collection('movimentos');
-  CollectionReference<Map<String, dynamic>> get _saleCol =>
-      db.collection('tenants').doc(tenantId).collection('vendas');
-  CollectionReference<Map<String, dynamic>> get _inCol =>
-      db.collection('tenants').doc(tenantId).collection('entradas');
-  CollectionReference<Map<String, dynamic>> get _alertCol =>
-      db.collection('tenants').doc(tenantId).collection('alertas');
+  /// Atualiza somente os campos permitidos nas rules de produtos.
+  Future<void> updateProductQty({
+    required String productId,
+    required int newQty,
+  }) async {
+    final uid = FirebaseAuth.instance.currentUser!.uid;
+    await db
+        .collection('tenants')
+        .doc(tenantId)
+        .collection('produtos')
+        .doc(productId)
+        .update({
+      'quantidade': newQty,
+      'updatedAt': FieldValue.serverTimestamp(),
+      'updatedBy': uid,
+    });
+  }
 
-  /// VENDA (saída)
+  /// Cria uma VENDA em /vendas, gera MOVIMENTOS de 'saida' e aplica a baixa nos produtos.
+  /// Tudo em uma única transação para consistência.
   Future<void> createSaleAndApply({
     required List<SaleLine> lines,
     required String usuarioId,
-    num? total,
-    String origem = 'app',
+    required double total,
+    String? pagamento,
+    String origem = 'manual_sale',
   }) async {
-    assert(lines.isNotEmpty, 'Precisa de ao menos 1 item');
+    if (lines.isEmpty) throw Exception('Sem itens');
+
+    final vendaRef =
+        db.collection('tenants').doc(tenantId).collection('vendas').doc();
+
     await db.runTransaction((tx) async {
-      final now = FieldValue.serverTimestamp();
-      final saleRef = _saleCol.doc();
-      final itemsDoc = <Map<String, dynamic>>[];
-
-      for (final it in lines) {
-        final prodRef = _prodCol.doc(it.produtoId);
-        final pSnap = await tx.get(prodRef);
-        if (!pSnap.exists)
-          throw Exception('Produto não encontrado: ${it.produtoId}');
-        final data = pSnap.data()!;
-        final qAny = data['quantidade'] ?? 0;
-        final minAny = data['estoqueMinimo'] ?? 0;
-        final cur = qAny is num ? qAny.toInt() : int.tryParse('$qAny') ?? 0;
-        final min = minAny is num
-            ? minAny.toInt()
-            : int.tryParse('$minAny') ?? 0;
-
-        final saida = max(0, it.qty);
-        final depois = max(0, cur - saida);
-
-        tx.update(prodRef, {'quantidade': depois, 'updatedAt': now});
-
-        final movRef = _movCol.doc();
-        tx.set(movRef, {
-          'produtoId': it.produtoId,
-          'tipo': 'saida',
-          'quantidade': saida,
-          'motivo': 'venda',
-          'origem': origem,
-          'usuarioId': usuarioId,
-          'mensagemOriginal': 'Venda ${saleRef.id}',
-          'createdAt': now,
-          'snapshot': {'antes': cur, 'depois': depois},
-        });
-
-        if ((cur > min && depois <= min) || depois == 0) {
-          final alertRef = _alertCol.doc();
-          tx.set(alertRef, {
-            'produtoId': it.produtoId,
-            'tipo': (depois == 0 ? 'sem_estoque' : 'baixo_estoque'),
-            'quantidade': depois,
-            'minimo': min,
-            'createdAt': now,
-          });
+      // 1) lê todos os produtos usados
+      final Map<String, DocumentSnapshot<Map<String, dynamic>>> prods = {};
+      for (final l in lines) {
+        final ref = db
+            .collection('tenants')
+            .doc(tenantId)
+            .collection('produtos')
+            .doc(l.produtoId);
+        prods[l.produtoId] = await tx.get(ref);
+        if (!prods[l.produtoId]!.exists) {
+          throw Exception('Produto ${l.produtoId} não encontrado');
         }
-
-        itemsDoc.add({
-          'produtoId': it.produtoId,
-          'qty': saida,
-          if (it.unitPrice != null) 'unitPrice': it.unitPrice,
-        });
       }
 
-      tx.set(saleRef, {
-        'items': itemsDoc,
-        if (total != null) 'total': (total as num).toDouble(),
+      // 2) cria a venda (rules: itens list, subtotal/total number, pagamento string opcional, usuarioId, createdAt)
+      tx.set(vendaRef, {
+        'itens': [
+          for (final l in lines)
+            {'produtoId': l.produtoId, 'qty': l.qty, 'unitPrice': l.unitPrice}
+        ],
+        'subtotal': total, // se tiver descontos, calcule e ajuste
+        'total': total,
+        'pagamento': (pagamento ?? ''),
         'usuarioId': usuarioId,
-        'origem': origem,
-        'createdAt': now,
-        'applied': true,
-        'appliedAt': now,
+        'createdAt': FieldValue.serverTimestamp(),
       });
+
+      // 3) para cada item, cria movimento SAÍDA e atualiza produto
+      for (final l in lines) {
+        final prodRef = db
+            .collection('tenants')
+            .doc(tenantId)
+            .collection('produtos')
+            .doc(l.produtoId);
+
+        final int atual =
+            (prods[l.produtoId]!.data()?['quantidade'] ?? 0) as int;
+        final int novo = (atual - l.qty) < 0 ? 0 : (atual - l.qty);
+
+        final movRef = db
+            .collection('tenants')
+            .doc(tenantId)
+            .collection('movimentos')
+            .doc();
+
+        tx.set(movRef, {
+          'tipo': 'saida',
+          'quantidade': l.qty,
+          'produtoId': l.produtoId,
+          'usuarioId': usuarioId,
+          'motivo': 'venda',
+          'origem': origem,
+          'mensagemOriginal': '',
+          'createdAt': FieldValue.serverTimestamp(),
+        });
+
+        tx.update(prodRef, {
+          'quantidade': novo,
+          'updatedAt': FieldValue.serverTimestamp(),
+          'updatedBy': usuarioId,
+        });
+      }
     });
   }
 
-  /// ENTRADA
+  /// Gera movimentos de ENTRADA e atualiza produtos (sem criar documento em /vendas).
   Future<void> createInboundAndApply({
     required List<InboundLine> lines,
     required String usuarioId,
-    String motivo = 'entrada',
-    String origem = 'app',
+    String origem = 'manual_entry',
+    String? motivo,
   }) async {
-    assert(lines.isNotEmpty, 'Precisa de ao menos 1 item');
+    if (lines.isEmpty) throw Exception('Sem itens');
+
     await db.runTransaction((tx) async {
-      final now = FieldValue.serverTimestamp();
-      final entryRef = _inCol.doc();
-      final itemsDoc = <Map<String, dynamic>>[];
+      for (final l in lines) {
+        final prodRef = db
+            .collection('tenants')
+            .doc(tenantId)
+            .collection('produtos')
+            .doc(l.produtoId);
+        final snap = await tx.get(prodRef);
+        if (!snap.exists) {
+          throw Exception('Produto ${l.produtoId} não encontrado');
+        }
+        final int atual = (snap.data()?['quantidade'] ?? 0) as int;
+        final int novo = atual + l.qty;
 
-      for (final it in lines) {
-        final prodRef = _prodCol.doc(it.produtoId);
-        final pSnap = await tx.get(prodRef);
-        if (!pSnap.exists)
-          throw Exception('Produto não encontrado: ${it.produtoId}');
-        final data = pSnap.data()!;
-        final qAny = data['quantidade'] ?? 0;
-        final cur = qAny is num ? qAny.toInt() : int.tryParse('$qAny') ?? 0;
+        final movRef = db
+            .collection('tenants')
+            .doc(tenantId)
+            .collection('movimentos')
+            .doc();
 
-        final entrada = max(0, it.qty);
-        final depois = cur + entrada;
-
-        tx.update(prodRef, {'quantidade': depois, 'updatedAt': now});
-
-        final movRef = _movCol.doc();
         tx.set(movRef, {
-          'produtoId': it.produtoId,
           'tipo': 'entrada',
-          'quantidade': entrada,
-          'motivo': motivo,
-          'origem': origem,
+          'quantidade': l.qty,
+          'produtoId': l.produtoId,
           'usuarioId': usuarioId,
-          'mensagemOriginal': 'Entrada ${entryRef.id}',
-          'createdAt': now,
-          'snapshot': {'antes': cur, 'depois': depois},
+          'motivo': motivo ?? '',
+          'origem': origem,
+          'mensagemOriginal': '',
+          'createdAt': FieldValue.serverTimestamp(),
         });
 
-        itemsDoc.add({
-          'produtoId': it.produtoId,
-          'qty': entrada,
-          if (it.unitCost != null) 'unitCost': it.unitCost,
+        tx.update(prodRef, {
+          'quantidade': novo,
+          'updatedAt': FieldValue.serverTimestamp(),
+          'updatedBy': usuarioId,
         });
       }
-
-      tx.set(entryRef, {
-        'items': itemsDoc,
-        'usuarioId': usuarioId,
-        'motivo': motivo,
-        'origem': origem,
-        'createdAt': now,
-        'applied': true,
-        'appliedAt': now,
-      });
     });
   }
 
-  /// AJUSTE (+ soma, - subtrai)
-  Future<void> adjustStock({
-    required String produtoId,
-    required int delta,
-    required String usuarioId,
-    String motivo = 'ajuste',
-    String origem = 'app',
-  }) async {
-    if (delta == 0) return;
-    await db.runTransaction((tx) async {
-      final now = FieldValue.serverTimestamp();
-      final prodRef = _prodCol.doc(produtoId);
-      final pSnap = await tx.get(prodRef);
-      if (!pSnap.exists) throw Exception('Produto não encontrado');
-      final data = pSnap.data()!;
-      final qAny = data['quantidade'] ?? 0;
-      final minAny = data['estoqueMinimo'] ?? 0;
-      final cur = qAny is num ? qAny.toInt() : int.tryParse('$qAny') ?? 0;
-      final min = minAny is num ? minAny.toInt() : int.tryParse('$minAny') ?? 0;
-
-      final depois = max(0, cur + delta);
-      final tipo = delta >= 0 ? 'entrada' : 'saida';
-      final qtd = delta.abs();
-
-      tx.update(prodRef, {'quantidade': depois, 'updatedAt': now});
-
-      final movRef = _movCol.doc();
-      tx.set(movRef, {
-        'produtoId': produtoId,
-        'tipo': tipo,
-        'quantidade': qtd,
-        'motivo': motivo,
-        'origem': origem,
-        'usuarioId': usuarioId,
-        'mensagemOriginal': 'Ajuste manual',
-        'createdAt': now,
-        'snapshot': {'antes': cur, 'depois': depois},
-      });
-
-      if ((cur > min && depois <= min) || depois == 0) {
-        final alertRef = _alertCol.doc();
-        tx.set(alertRef, {
-          'produtoId': produtoId,
-          'tipo': (depois == 0 ? 'sem_estoque' : 'baixo_estoque'),
-          'quantidade': depois,
-          'minimo': min,
-          'createdAt': now,
-        });
-      }
-    });
+  /// Resumo para a IA responder.
+  Future<({int itens, double valor})> getTotals() async {
+    final snap = await db
+        .collection('tenants')
+        .doc(tenantId)
+        .collection('produtos')
+        .get();
+    int itens = 0;
+    double valor = 0.0;
+    for (final d in snap.docs) {
+      final q = (d.data()['quantidade'] ?? 0) as int;
+      final pAny = d.data()['preco'];
+      final p = pAny is num ? pAny.toDouble() : 0.0;
+      itens += q;
+      valor += q * p;
+    }
+    return (itens: itens, valor: valor);
   }
 }

@@ -1,6 +1,7 @@
 // lib/features/auth/role_guard.dart
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:smartstock_flutter_only/features/tenant/tenant_gate.dart';
 
 import '../tenant/tenant_provider.dart';
 import '../tenant/tenant_join_create_page.dart';

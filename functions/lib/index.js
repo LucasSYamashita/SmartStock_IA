@@ -47,9 +47,9 @@ const db = admin.firestore();
 // Vertex config (usa ADC do Cloud Functions)
 const PROJECT_ID = process.env.GCLOUD_PROJECT || process.env.GCP_PROJECT || "";
 const VERTEX_LOCATION = "us-central1";
-// Modelo pode vir do config: firebase functions:config:set gemini.model="gemini-2.5-flash"
+// Modelo (firebase functions:config:set gemini.model="gemini-2.5-flash")
 const CONFIG_MODEL = (functions.config().gemini && functions.config().gemini.model) || "";
-const CHAT_MODEL = CONFIG_MODEL || "gemini-2.5-flash"; // default seguro
+const CHAT_MODEL = CONFIG_MODEL || "gemini-2.5-flash";
 const vertex = new vertexai_1.VertexAI({ project: PROJECT_ID, location: VERTEX_LOCATION });
 const chatModel = vertex.getGenerativeModel({ model: CHAT_MODEL });
 // ====== HTTP utils ======
@@ -74,18 +74,15 @@ function movCol(t) {
 async function findProductByName(tenantId, name) {
     const lower = name.trim().toLowerCase();
     const col = db.collection("tenants").doc(tenantId).collection("produtos");
-    // 1) nomeLower == lower
     let snap = await col.where("nomeLower", "==", lower).limit(1).get();
     if (!snap.empty) {
         const doc = snap.docs[0];
         const data = doc.data();
-        // backfill se faltar
         if (!data.nomeLower && (data.nome || data.Nome)) {
             await doc.ref.update({ nomeLower: String(data.nome ?? data.Nome).toLowerCase().trim() });
         }
         return { id: doc.id, ref: doc.ref, data };
     }
-    // 2) nome == name
     snap = await col.where("nome", "==", name.trim()).limit(1).get();
     if (!snap.empty) {
         const doc = snap.docs[0];
@@ -95,7 +92,6 @@ async function findProductByName(tenantId, name) {
         }
         return { id: doc.id, ref: doc.ref, data };
     }
-    // 3) tentativa de prefixo (se tiver índice)
     try {
         snap = await col
             .orderBy("nomeLower")
@@ -112,10 +108,7 @@ async function findProductByName(tenantId, name) {
             return { id: doc.id, ref: doc.ref, data };
         }
     }
-    catch {
-        // sem índice
-    }
-    // 4) fallback: amostra
+    catch { }
     const sample = await col.limit(50).get();
     for (const d of sample.docs) {
         const data = d.data();
@@ -129,8 +122,29 @@ async function findProductByName(tenantId, name) {
     }
     return null;
 }
+async function ensureProduct(tenantId, name, initialQty = 0) {
+    const existing = await findProductByName(tenantId, name);
+    if (existing)
+        return { ...existing, created: false };
+    const col = db.collection("tenants").doc(tenantId).collection("produtos");
+    const doc = col.doc();
+    const now = admin.firestore.FieldValue.serverTimestamp();
+    const data = {
+        nome: name,
+        nomeLower: name.toLowerCase().trim(),
+        quantidade: Math.max(0, initialQty),
+        estoqueMinimo: 0,
+        preco: 0,
+        ativo: true,
+        createdAt: now,
+        updatedAt: now,
+        createdBy: "chat-act",
+    };
+    await doc.set(data);
+    return { id: doc.id, ref: doc, data, created: true };
+}
 async function executeAction(args) {
-    const { tenantId, uid, role, acao, produto, quantidade, mes } = args;
+    const { tenantId, uid, role, acao, produto, quantidade, mes, allowCreateMissing } = args;
     if (!tenantId)
         throw new Error("tenantId obrigatório");
     if (!acao || !produto)
@@ -142,54 +156,78 @@ async function executeAction(args) {
         const q = Number(quantidade || 0);
         if (!Number.isFinite(q) || q <= 0)
             throw new Error("quantidade inválida.");
-        const prod = await findProductByName(tenantId, produto);
-        if (!prod)
-            throw new Error(`Produto "${produto}" não encontrado.`);
-        const pRef = prodRef(tenantId, prod.id);
-        const mRef = movCol(tenantId).doc();
-        let before = 0;
-        let after = 0;
-        await db.runTransaction(async (tx) => {
-            const snap = await tx.get(pRef);
-            if (!snap.exists)
-                throw new Error("Produto inexistente");
-            const d = snap.data();
-            // lê compatível (Quantidade ou quantidade)
-            const curr = Number(d?.quantidade ??
-                d?.Quantidade ??
-                0);
-            const next = acao === "entrada" ? curr + q : curr - q;
-            if (next < 0)
-                throw new Error(`Estoque insuficiente: atual=${curr}, saída=${q}`);
-            before = curr;
-            after = next;
-            // atualiza ambos os campos p/ compatibilidade
-            tx.update(pRef, {
-                quantidade: next,
-                Quantidade: next,
-                updatedAt: admin.firestore.FieldValue.serverTimestamp(),
-                updatedBy: uid,
+        if (acao === "entrada") {
+            // 👇 cria se não existir e se foi autorizado
+            const ensured = allowCreateMissing ? await ensureProduct(tenantId, produto, q) : await findProductByName(tenantId, produto);
+            const prod = ensured || await findProductByName(tenantId, produto);
+            if (!prod)
+                throw new Error(`Produto "${produto}" não encontrado.`);
+            const pRef = prodRef(tenantId, prod.id);
+            const mRef = movCol(tenantId).doc();
+            await db.runTransaction(async (tx) => {
+                const snap = await tx.get(pRef);
+                if (!snap.exists)
+                    throw new Error("Produto inexistente");
+                const curr = Number(snap.data()?.quantidade ?? 0);
+                // se criou com initialQty=q, aqui ainda somamos q (estoque final = curr + q)
+                const next = curr + q;
+                tx.update(pRef, {
+                    quantidade: next,
+                    updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+                    updatedBy: uid,
+                });
+                tx.set(mRef, {
+                    tipo: acao,
+                    produtoId: prod.id,
+                    usuarioId: uid,
+                    quantidade: q,
+                    motivo: "compra",
+                    origem: "chat",
+                    createdAt: admin.firestore.FieldValue.serverTimestamp(),
+                });
             });
-            tx.set(mRef, {
-                tipo: acao,
-                produtoId: prod.id,
-                usuarioId: uid,
-                quantidade: q,
-                motivo: acao === "entrada" ? "compra" : "venda",
-                origem: "chat",
-                createdAt: admin.firestore.FieldValue.serverTimestamp(),
+            return {
+                ok: true,
+                created: ensured?.created ?? false,
+                message: ensured?.created
+                    ? `🆕 Produto "${produto}" criado e entrada de ${q} un. registrada.`
+                    : `✅ entrada de ${q} un. no produto "${produto}" registrada.`,
+            };
+        }
+        if (acao === "saida") {
+            const prod = await findProductByName(tenantId, produto);
+            if (!prod)
+                throw new Error(`Produto "${produto}" não encontrado.`);
+            const pRef = prodRef(tenantId, prod.id);
+            const mRef = movCol(tenantId).doc();
+            await db.runTransaction(async (tx) => {
+                const snap = await tx.get(pRef);
+                if (!snap.exists)
+                    throw new Error("Produto inexistente");
+                const curr = Number(snap.data()?.quantidade ?? 0);
+                const next = curr - q;
+                if (next < 0)
+                    throw new Error(`Estoque insuficiente: atual=${curr}, saída=${q}`);
+                tx.update(pRef, {
+                    quantidade: next,
+                    updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+                    updatedBy: uid,
+                });
+                tx.set(mRef, {
+                    tipo: acao,
+                    produtoId: prod.id,
+                    usuarioId: uid,
+                    quantidade: q,
+                    motivo: "venda",
+                    origem: "chat",
+                    createdAt: admin.firestore.FieldValue.serverTimestamp(),
+                });
             });
-        });
-        const nomeProd = (prod.data?.nome ?? prod.data?.Nome ?? produto);
-        return {
-            ok: true,
-            tenantId,
-            productId: prod.id,
-            before,
-            after,
-            delta: acao === "entrada" ? +q : -q,
-            message: `✅ ${acao} de ${q} un. no produto "${nomeProd}" registrada. (${before} → ${after})`,
-        };
+            return {
+                ok: true,
+                message: `✅ saída de ${q} un. no produto "${produto}" registrada.`,
+            };
+        }
     }
     if (acao === "relatorio") {
         const dt = new Date();
@@ -226,29 +264,23 @@ async function executeAction(args) {
 // ====== LLM helpers ======
 function buildChatPrompt(system, messages) {
     const lines = [];
-    if (system && system.trim()) {
+    if (system && system.trim())
         lines.push(`SYSTEM:\n${system.trim()}`);
-    }
-    for (const m of messages) {
+    for (const m of messages)
         lines.push(`${m.role}: ${m.content}`);
-    }
     return lines.join("\n");
 }
-// Remove cercas de código e tenta parsear JSON
 function parseJsonLoose(raw) {
     let s = (raw || "").trim();
-    // remove cercas ```json ... ```
     if (s.startsWith("```")) {
         s = s.replace(/^```[a-zA-Z]*\n?/, "").replace(/```$/, "").trim();
     }
-    // remove “json\n{ ... }” no começo
-    if (s.toLowerCase().startsWith("json")) {
+    if (s.toLowerCase().startsWith("json"))
         s = s.substring(4).trim();
-    }
     return JSON.parse(s);
 }
 // ====== Endpoints ======
-// 0) Diagnóstico rápido
+// Diagnóstico
 exports.diag = functions.region(REGION).https.onRequest(async (_req, res) => {
     setCors(res);
     res.status(200).json({
@@ -258,8 +290,8 @@ exports.diag = functions.region(REGION).https.onRequest(async (_req, res) => {
         configModel: CONFIG_MODEL || null,
     });
 });
-// 1) Chat “livre” (não altera estoque)
-exports.chat = functions.region(REGION).https.onRequest(async function (req, res) {
+// Chat livre
+exports.chat = functions.region(REGION).https.onRequest(async (req, res) => {
     if (req.method === "OPTIONS") {
         setCors(res);
         return res.status(204).send("");
@@ -280,8 +312,8 @@ exports.chat = functions.region(REGION).https.onRequest(async function (req, res
         return res.status(500).json({ error: String(e?.message || e) });
     }
 });
-// 2) Interpretar & Executar (dryRun / confirm)
-exports.act = functions.region(REGION).https.onRequest(async function (req, res) {
+// Interpretar & Executar (dryRun/confirm/createIfMissing)
+exports.act = functions.region(REGION).https.onRequest(async (req, res) => {
     if (req.method === "OPTIONS") {
         setCors(res);
         return res.status(204).send("");
@@ -289,6 +321,8 @@ exports.act = functions.region(REGION).https.onRequest(async function (req, res)
     setCors(res);
     const dryRun = String(req.query?.dryRun ?? "true") === "true";
     const confirm = String(req.query?.confirm ?? "false") === "true";
+    // 👇 NOVO: habilita criação automática de produto quando acao=entrada
+    const createIfMissing = String(req.query?.createIfMissing ?? "false") === "true";
     try {
         const { messages = [], system } = (req.body || {});
         const { tenantId, role, uid } = getAuthContext(req);
@@ -321,12 +355,7 @@ Se faltar quantidade, não crie entrada/saida.`;
             const txt = acao === "relatorio"
                 ? `Proposta: relatório do produto "${produto}" (mês: ${mes ?? "atual"}). Confirma?`
                 : `Proposta: ${acao} de ${quantidade ?? "??"} un. em "${produto}". Confirma?`;
-            return res.status(200).json({
-                ok: true,
-                parsed,
-                assistant_text: txt,
-                dryRun: true,
-            });
+            return res.status(200).json({ ok: true, parsed, assistant_text: txt, dryRun: true });
         }
         if (!confirm) {
             return res.status(400).json({
@@ -335,8 +364,11 @@ Se faltar quantidade, não crie entrada/saida.`;
                 parsed,
             });
         }
-        // Executa
-        const exec = await executeAction({ tenantId, uid, role, acao, produto, quantidade, mes });
+        // 👇 Passa createIfMissing para a execução
+        const exec = await executeAction({
+            tenantId, uid, role, acao, produto, quantidade, mes,
+            allowCreateMissing: createIfMissing,
+        });
         return res.status(200).json({
             ok: true,
             parsed,
@@ -350,7 +382,7 @@ Se faltar quantidade, não crie entrada/saida.`;
         return res.status(500).json({ ok: false, error: String(e?.message || e) });
     }
 });
-// 3) parseStockCommand (Callable)
+// parseStockCommand (callable)
 exports.parseStockCommand = functions.region(REGION).https.onCall(async (data, context) => {
     if (!context.auth)
         throw new functions.https.HttpsError("unauthenticated", "Faça login.");
@@ -389,8 +421,8 @@ Idioma: ${locale}. Não invente quantidade.`;
     }));
     return { operations: clean };
 });
-// === WHOAMI: mostra a SA em uso e o Project ID
-exports.whoami = functions.region(REGION).https.onRequest(async (req, res) => {
+// whoami
+exports.whoami = functions.region(REGION).https.onRequest(async (_req, res) => {
     res.set("Access-Control-Allow-Origin", "*");
     res.json({
         projectId: process.env.GCLOUD_PROJECT || process.env.GCP_PROJECT,
@@ -398,7 +430,7 @@ exports.whoami = functions.region(REGION).https.onRequest(async (req, res) => {
         firestoreDbPath: `projects/${process.env.GCLOUD_PROJECT}/databases/(default)`,
     });
 });
-// === FIRESTORE PROBE: tenta escrever um doc simples
+// probe
 exports.firestoreProbe = functions.region(REGION).https.onRequest(async (req, res) => {
     res.set("Access-Control-Allow-Origin", "*");
     try {

@@ -1,3 +1,4 @@
+// lib/Homepage.dart
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/material.dart';
@@ -8,8 +9,11 @@ import 'features/products/product_list_page.dart' show ProductListPage;
 import 'features/chat/chat_page.dart';
 import 'features/auth/profile_page.dart';
 import 'features/settings/theme_mode_provider.dart';
-import 'features/tenant/tenant_provider.dart'; // <- tenantIdProvider aqui
+import 'features/tenant/tenant_provider.dart';
+import 'features/tenant/role_providers.dart';
+import 'features/tenant/membership_guard.dart';
 import 'features/sales/manual_sale_flow.dart';
+import 'features/moviments/movement_history_page.dart';
 
 class HomePage extends ConsumerStatefulWidget {
   const HomePage({super.key});
@@ -23,13 +27,15 @@ class _HomePageState extends ConsumerState<HomePage> {
   @override
   Widget build(BuildContext context) {
     final mode = ref.watch(themeModeProvider);
-    final tenantId = ref.watch(tenantIdProvider); // String (com fallback)
-    final isAdmin = ref.watch(isAdminProvider); // bool
+    final tenantId = ref.watch(tenantIdProvider); // pode ser null
+    final isAdmin = tenantId == null
+        ? false
+        : ref.watch(isAdminProvider(tenantId)); // family precisa do tenantId
 
     final pages = <Widget>[
       DashboardPage(onConsultarEstoque: () => setState(() => index = 1)),
-      const ProductListPage(),
-      const ChatPage(),
+      const RequireMember(child: ProductListPage()),
+      const RequireMember(child: ChatPage()),
       const ProfilePage(),
     ];
 
@@ -53,15 +59,30 @@ class _HomePageState extends ConsumerState<HomePage> {
       );
     }
 
+    final title = tenantId == null ? 'SmartStock' : 'SmartStock · $tenantId';
+
     return Scaffold(
       appBar: AppBar(
-        title: Text('SmartStock · $tenantId'),
+        title: Text(title),
         actions: [
+          // Atalho para Relatórios (Histórico de movimentações)
+          IconButton(
+            tooltip: 'Relatórios',
+            icon: const Icon(Icons.receipt_long),
+            onPressed: tenantId == null
+                ? null
+                : () {
+                    Navigator.of(context).push(
+                      MaterialPageRoute(
+                        builder: (_) => const MovementHistoryPage(),
+                      ),
+                    );
+                  },
+          ),
           IconButton(
             tooltip: 'Alternar tema',
             icon: Icon(
-              mode == ThemeMode.dark ? Icons.dark_mode : Icons.light_mode,
-            ),
+                mode == ThemeMode.dark ? Icons.dark_mode : Icons.light_mode),
             onPressed: () {
               final n = ref.read(themeModeProvider.notifier);
               n.state =
@@ -72,8 +93,7 @@ class _HomePageState extends ConsumerState<HomePage> {
             tooltip: 'Sair',
             icon: const Icon(Icons.logout),
             onPressed: () async {
-              // limpa tenant para o padrão e faz signout
-              ref.read(tenantIdProvider.notifier).clear();
+              await ref.read(tenantIdProvider.notifier).clear();
               await FirebaseAuth.instance.signOut();
             },
           ),
@@ -121,7 +141,7 @@ class _HomePageState extends ConsumerState<HomePage> {
 
   Future<void> _addProduct(BuildContext context) async {
     final nameCtrl = TextEditingController();
-    final brandCtrl = TextEditingController();
+    final brandCtrl = TextEditingController(); // apenas visual, não salva
     final qtdCtrl = TextEditingController(text: '0');
     final minCtrl = TextEditingController(text: '0');
     final priceCtrl = TextEditingController(text: '0');
@@ -134,8 +154,9 @@ class _HomePageState extends ConsumerState<HomePage> {
         builder: (ctx, setLocal) {
           Future<void> save() async {
             final tenantId = ref.read(tenantIdProvider);
+            if (tenantId == null || tenantId.isEmpty) return;
+
             final nome = nameCtrl.text.trim();
-            final marca = brandCtrl.text.trim();
             final quantidade = int.tryParse(qtdCtrl.text.trim()) ?? 0;
             final minimo = int.tryParse(minCtrl.text.trim()) ?? 0;
             final preco = _parsePreco(priceCtrl.text);
@@ -150,16 +171,23 @@ class _HomePageState extends ConsumerState<HomePage> {
             }
 
             try {
+              final uid = FirebaseAuth.instance.currentUser!.uid;
+
+              // Campos compatíveis com as regras
               final data = <String, dynamic>{
                 'nome': nome,
                 'nomeLower': nome.toLowerCase(),
+                'categoria': '',
+                'sku': '',
+                'preco': preco,
                 'quantidade': quantidade,
                 'estoqueMinimo': minimo,
-                'precoVenda': preco,
+                'ativo': true,
                 'createdAt': FieldValue.serverTimestamp(),
+                'createdBy': uid,
                 'updatedAt': FieldValue.serverTimestamp(),
+                'updatedBy': uid,
               };
-              if (marca.isNotEmpty) data['marca'] = marca;
 
               await FirebaseFirestore.instance
                   .collection('tenants')
@@ -170,7 +198,8 @@ class _HomePageState extends ConsumerState<HomePage> {
               if (!context.mounted) return;
               Navigator.pop(context);
               ScaffoldMessenger.of(context).showSnackBar(
-                  const SnackBar(content: Text('Produto criado.')));
+                const SnackBar(content: Text('Produto criado.')),
+              );
             } on FirebaseException catch (e) {
               setLocal(() => err = '${e.code}: ${e.message}');
             } catch (e) {
@@ -193,7 +222,7 @@ class _HomePageState extends ConsumerState<HomePage> {
                   TextField(
                     controller: brandCtrl,
                     decoration: const InputDecoration(
-                      labelText: 'Marca (opcional)',
+                      labelText: 'Marca (apenas visual — não é salva)',
                     ),
                   ),
                   const SizedBox(height: 8),
@@ -205,29 +234,24 @@ class _HomePageState extends ConsumerState<HomePage> {
                   const SizedBox(height: 8),
                   TextField(
                     controller: minCtrl,
-                    decoration: const InputDecoration(
-                      labelText: 'Estoque mínimo',
-                    ),
+                    decoration:
+                        const InputDecoration(labelText: 'Estoque mínimo'),
                     keyboardType: TextInputType.number,
                   ),
                   const SizedBox(height: 8),
                   TextField(
                     controller: priceCtrl,
                     decoration: const InputDecoration(
-                      labelText: 'Preço de venda (R\$)',
-                    ),
-                    keyboardType: const TextInputType.numberWithOptions(
-                      decimal: true,
-                    ),
+                        labelText: 'Preço de venda (R\$)'),
+                    keyboardType:
+                        const TextInputType.numberWithOptions(decimal: true),
                   ),
                   if (err != null) ...[
                     const SizedBox(height: 8),
                     Align(
                       alignment: Alignment.centerLeft,
-                      child: Text(
-                        err!,
-                        style: const TextStyle(color: Colors.red),
-                      ),
+                      child:
+                          Text(err!, style: const TextStyle(color: Colors.red)),
                     ),
                   ],
                 ],

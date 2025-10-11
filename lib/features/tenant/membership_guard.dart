@@ -46,9 +46,9 @@ class RequireMember extends ConsumerWidget {
       loading: () =>
           loading ??
           const Scaffold(body: Center(child: CircularProgressIndicator())),
-      error: (e, _) => Scaffold(body: Center(child: Text('Erro: $e'))),
+      error: (e, _) =>
+          Scaffold(body: Center(child: Text('Erro membership: $e'))),
       data: (m) {
-        // sem registro ou está desativado
         if (m == null || (m['active'] == false)) {
           return notMember ?? const TenantJoinCreatePage();
         }
