@@ -1,78 +1,65 @@
-// lib/features/chat/chat_service.dart
-import 'dart:convert';
-import 'package:flutter_riverpod/flutter_riverpod.dart';
-import 'package:http/http.dart' as http;
-
-import '../tenant/tenant_provider.dart';
-import '../tenant/role_providers.dart';
+import 'package:cloud_functions/cloud_functions.dart';
+import 'package:firebase_auth/firebase_auth.dart';
 
 class ChatService {
-  final Ref ref;
-  const ChatService(this.ref);
+  final _functions =
+      FirebaseFunctions.instanceFor(region: 'southamerica-east1');
 
-  String get _baseUrl => const String.fromEnvironment('SMARTSTOCK_FUNC_BASE',
-      defaultValue:
-          'https://southamerica-east1-smartstock-ae7ad.cloudfunctions.net');
-
-  Future<String> chatOnce({required List<Map<String, String>> history}) async {
-    final tenantId = ref.read(tenantIdProvider) ?? 'TENANT01';
-    final role = ref.read(effectiveRoleProvider(tenantId));
-
-    final Map<String, String> headers = {
-      'Content-Type': 'application/json',
-      'x-tenant-id': tenantId,
-      'x-role': role,
-      'x-uid': 'MOBILE',
-    };
-
-    final resp = await http.post(
-      Uri.parse('$_baseUrl/chat?stream=false'),
-      headers: headers,
-      body: jsonEncode({'messages': history}),
-    );
-
-    if (resp.statusCode == 200) {
-      final j = jsonDecode(resp.body) as Map<String, dynamic>;
-      return (j['text'] ?? '').toString();
-    }
-    throw 'HTTP ${resp.statusCode}: ${resp.body}';
-  }
-
-  Stream<String> chatStream(
-      {required List<Map<String, String>> history}) async* {
-    final txt = await chatOnce(history: history);
-    yield txt;
-  }
-
-  Future<Map<String, dynamic>> act({
-    required List<Map<String, String>> messages,
-    bool dryRun = true,
-    bool confirm = false,
-    bool createIfMissing = false,
+  /// Faz 2 chamadas: dryRun (parse) -> execute (confirm).
+  Future<List<String>> actStepwise({
+    required String tenantId,
+    required String role, // 'admin' | 'staff' | 'viewer'
+    required String text,
   }) async {
-    final tenantId = ref.read(tenantIdProvider) ?? 'TENANT01';
-    final role = ref.read(effectiveRoleProvider(tenantId));
-
-    final Map<String, String> headers = {
-      'Content-Type': 'application/json',
-      'x-tenant-id': tenantId,
-      'x-role': role,
-      'x-uid': 'MOBILE',
-    };
-
-    final uri = Uri.parse(
-        '$_baseUrl/act?dryRun=$dryRun&confirm=$confirm&createIfMissing=$createIfMissing');
-
-    final resp = await http.post(
-      uri,
-      headers: headers,
-      body: jsonEncode({'messages': messages}),
-    );
-
-    final j = jsonDecode(resp.body) as Map<String, dynamic>;
-    if (resp.statusCode != 200) {
-      throw (j['error'] ?? resp.body).toString();
+    if (FirebaseAuth.instance.currentUser == null) {
+      throw Exception('[unauthenticated] Faça login para usar o chat.');
     }
-    return j;
+    if (tenantId.isEmpty) {
+      throw Exception('[invalid-argument] Selecione/Crie uma loja (tenant).');
+    }
+
+    final callable = _functions.httpsCallable('actCall');
+
+    Map<String, dynamic> _payload(bool dryRun, bool confirm) => {
+          'tenantId': tenantId,
+          'role': role,
+          'dryRun': dryRun,
+          'confirm': confirm,
+          'createIfMissing': true,
+          'messages': [
+            {'role': 'user', 'content': text}
+          ],
+          'system': 'Interprete e execute ações de estoque com segurança.',
+        };
+
+    try {
+      // 1) interpretação
+      final r1 = await callable.call(_payload(true, false));
+      final d1 = (r1.data as Map?) ?? {};
+      final parsed = d1['parsed'];
+      final assist = (d1['assistant_text'] as String?)?.trim() ??
+          'Interpretei seu pedido.';
+
+      if (parsed == null) {
+        throw Exception(
+            '[invalid-argument] Interpretação incompleta pelo parser.');
+      }
+
+      // 2) execução
+      final r2 = await callable.call(_payload(false, true));
+      final d2 = (r2.data as Map?) ?? {};
+      final msg = (d2['assistant_text'] as String?)?.trim() ??
+          (d2['result']?['message'] as String?)?.trim() ??
+          'OK';
+
+      return [assist, msg];
+    } on FirebaseFunctionsException catch (e) {
+      final code = e.code.isNotEmpty ? e.code : 'internal';
+      final msg = e.message ?? 'Falha na função.';
+      final det = e.details != null ? ' (${e.details})' : '';
+      throw Exception('[$code] $msg$det');
+    } catch (e) {
+      throw Exception('Falha: $e');
+    }
   }
 }

@@ -13,7 +13,6 @@ import 'features/tenant/tenant_provider.dart';
 import 'features/tenant/role_providers.dart';
 import 'features/tenant/membership_guard.dart';
 import 'features/sales/manual_sale_flow.dart';
-import 'features/moviments/movement_history_page.dart';
 
 class HomePage extends ConsumerStatefulWidget {
   const HomePage({super.key});
@@ -65,20 +64,6 @@ class _HomePageState extends ConsumerState<HomePage> {
       appBar: AppBar(
         title: Text(title),
         actions: [
-          // Atalho para Relatórios (Histórico de movimentações)
-          IconButton(
-            tooltip: 'Relatórios',
-            icon: const Icon(Icons.receipt_long),
-            onPressed: tenantId == null
-                ? null
-                : () {
-                    Navigator.of(context).push(
-                      MaterialPageRoute(
-                        builder: (_) => const MovementHistoryPage(),
-                      ),
-                    );
-                  },
-          ),
           IconButton(
             tooltip: 'Alternar tema',
             icon: Icon(
@@ -139,9 +124,10 @@ class _HomePageState extends ConsumerState<HomePage> {
     return double.tryParse(s) ?? 0.0;
   }
 
+  /// Diálogo: criar produto + LOG de entrada inicial (sem travar a UI se o log falhar)
   Future<void> _addProduct(BuildContext context) async {
     final nameCtrl = TextEditingController();
-    final brandCtrl = TextEditingController(); // apenas visual, não salva
+    final brandCtrl = TextEditingController(); // só visual
     final qtdCtrl = TextEditingController(text: '0');
     final minCtrl = TextEditingController(text: '0');
     final priceCtrl = TextEditingController(text: '0');
@@ -155,6 +141,8 @@ class _HomePageState extends ConsumerState<HomePage> {
           Future<void> save() async {
             final tenantId = ref.read(tenantIdProvider);
             if (tenantId == null || tenantId.isEmpty) return;
+
+            setLocal(() => err = null);
 
             final nome = nameCtrl.text.trim();
             final quantidade = int.tryParse(qtdCtrl.text.trim()) ?? 0;
@@ -189,18 +177,51 @@ class _HomePageState extends ConsumerState<HomePage> {
                 'updatedBy': uid,
               };
 
-              await FirebaseFirestore.instance
+              // 1) cria o produto
+              final doc = await FirebaseFirestore.instance
                   .collection('tenants')
                   .doc(tenantId)
                   .collection('produtos')
                   .add(data);
 
+              // 2) Fecha modal e dá sucesso imediatamente
               if (!context.mounted) return;
               Navigator.pop(context);
               ScaffoldMessenger.of(context).showSnackBar(
                 const SnackBar(content: Text('Produto criado.')),
               );
+
+              // 3) Tenta registrar histórico de entrada sem afetar a UI
+              if (quantidade > 0) {
+                try {
+                  await FirebaseFirestore.instance
+                      .collection('tenants')
+                      .doc(tenantId)
+                      .collection('movimentos')
+                      .add({
+                    'tipo': 'entrada',
+                    'quantidade': quantidade,
+                    'produtoId': doc.id,
+                    'produtoNome': nome,
+                    'usuarioId': uid,
+                    'origem': 'create_product',
+                    'motivo': 'cadastro inicial',
+                    'createdAt': FieldValue.serverTimestamp(),
+                  });
+                } catch (e) {
+                  if (context.mounted) {
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      SnackBar(
+                        content: Text(
+                          'Produto salvo; não foi possível registrar histórico: $e',
+                        ),
+                      ),
+                    );
+                  }
+                }
+              }
             } on FirebaseException catch (e) {
+              // Erro na criação do produto → aparece no modal
               setLocal(() => err = '${e.code}: ${e.message}');
             } catch (e) {
               setLocal(() => err = e.toString());
@@ -250,8 +271,10 @@ class _HomePageState extends ConsumerState<HomePage> {
                     const SizedBox(height: 8),
                     Align(
                       alignment: Alignment.centerLeft,
-                      child:
-                          Text(err!, style: const TextStyle(color: Colors.red)),
+                      child: Text(
+                        err!,
+                        style: const TextStyle(color: Colors.red),
+                      ),
                     ),
                   ],
                 ],

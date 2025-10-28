@@ -1,12 +1,11 @@
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-import 'package:smartstock_flutter_only/features/auth/profile_page.dart';
-import 'package:smartstock_flutter_only/features/inbound/manual_entry_page.dart';
 
-// ✅ ajuste do import: agora aponta para o arquivo que você tem no repo
+import '../inbound/manual_entry_page.dart';
 import '../sales/manual_sale_flow.dart' show ManualSaleCatalogPage;
-
+import '../moviments/movement_history_page.dart';
+import '../auth/profile_page.dart';
 import '../tenant/tenant_provider.dart';
 
 class DashboardPage extends ConsumerWidget {
@@ -16,37 +15,36 @@ class DashboardPage extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final tenantId = ref.watch(tenantIdProvider);
-
     if (tenantId == null) {
       return const Center(
-        child: Text('Nenhuma loja selecionada. Crie/entre em uma loja.'),
+        child: Padding(
+          padding: EdgeInsets.all(24),
+          child: Text(
+              'Nenhuma loja selecionada. Crie/entre em uma loja no Perfil.'),
+        ),
       );
     }
 
-    // Produtos da loja
-    final productsStream = FirebaseFirestore.instance
-        .collection('tenants')
-        .doc(tenantId)
-        .collection('produtos')
-        .snapshots();
-
-    // Vendas do mês corrente (somar campo "total")
+    // Streams para KPIs
     final now = DateTime.now();
     final firstOfMonth = DateTime(now.year, now.month, 1);
     final vendasMesStream = FirebaseFirestore.instance
         .collection('tenants')
         .doc(tenantId)
         .collection('vendas')
-        .where(
-          'createdAt',
-          isGreaterThanOrEqualTo: Timestamp.fromDate(firstOfMonth),
-        )
+        .where('createdAt',
+            isGreaterThanOrEqualTo: Timestamp.fromDate(firstOfMonth))
+        .snapshots();
+
+    final produtosStream = FirebaseFirestore.instance
+        .collection('tenants')
+        .doc(tenantId)
+        .collection('produtos')
         .snapshots();
 
     return StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
-      stream: productsStream,
+      stream: produtosStream,
       builder: (context, prodSnap) {
-        // métricas baseadas nos produtos
         num saldoEstoque = 0;
         int totalProdutos = 0;
         int semEstoque = 0;
@@ -57,7 +55,7 @@ class DashboardPage extends ConsumerWidget {
           for (final d in prodSnap.data!.docs) {
             final m = d.data();
             final qAny = m['quantidade'] ?? m['Quantidade'] ?? 0;
-            final vAny = m['valor'] ?? m['preco'] ?? m['precoVenda'] ?? 0;
+            final vAny = m['preco'] ?? m['valor'] ?? m['precoVenda'] ?? 0;
             final minAny = m['estoqueMinimo'] ?? m['EstoqueMinimo'] ?? 0;
 
             final q = qAny is num ? qAny.toInt() : int.tryParse('$qAny') ?? 0;
@@ -67,11 +65,9 @@ class DashboardPage extends ConsumerWidget {
                 minAny is num ? minAny.toInt() : int.tryParse('$minAny') ?? 0;
 
             saldoEstoque += q * v;
-            if (q <= 0) {
+            if (q <= 0)
               semEstoque++;
-            } else if (q <= min) {
-              baixo++;
-            }
+            else if (q <= min) baixo++;
           }
         }
 
@@ -81,10 +77,10 @@ class DashboardPage extends ConsumerWidget {
             num vendasDoMes = 0;
             if (venSnap.hasData) {
               for (final d in venSnap.data!.docs) {
-                final vAny = d.data()['total'] ?? 0;
-                final v = vAny is num
-                    ? vAny.toDouble()
-                    : double.tryParse('$vAny') ?? 0.0;
+                final any = d.data()['total'] ?? 0;
+                final v = any is num
+                    ? any.toDouble()
+                    : double.tryParse('$any') ?? 0.0;
                 vendasDoMes += v;
               }
             }
@@ -96,18 +92,13 @@ class DashboardPage extends ConsumerWidget {
                 Row(
                   children: [
                     Expanded(
-                      child: _BigStatCard(
-                        title: 'Vendas do mês',
-                        value: _fmtCurrency(vendasDoMes),
-                      ),
-                    ),
+                        child: _BigStatCard(
+                            title: 'Vendas do mês',
+                            value: _fmtCurrency(vendasDoMes))),
                     const SizedBox(width: 12),
                     Expanded(
-                      child: _BigStatCard(
-                        title: 'Produtos',
-                        value: '$totalProdutos',
-                      ),
-                    ),
+                        child: _BigStatCard(
+                            title: 'Produtos', value: '$totalProdutos')),
                   ],
                 ),
                 const SizedBox(height: 12),
@@ -128,9 +119,8 @@ class DashboardPage extends ConsumerWidget {
                         title: 'Estoque baixo',
                         value: '$baixo',
                         color: Theme.of(context).colorScheme.secondaryContainer,
-                        onColor: Theme.of(
-                          context,
-                        ).colorScheme.onSecondaryContainer,
+                        onColor:
+                            Theme.of(context).colorScheme.onSecondaryContainer,
                         icon: Icons.warning_amber,
                       ),
                     ),
@@ -138,7 +128,7 @@ class DashboardPage extends ConsumerWidget {
                 ),
                 const SizedBox(height: 16),
 
-                // Grade de botões (menus)
+                // Grade de atalhos (4 itens)
                 GridView.count(
                   physics: const NeverScrollableScrollPhysics(),
                   crossAxisCount: 2,
@@ -150,52 +140,40 @@ class DashboardPage extends ConsumerWidget {
                     _MenuPill(
                       icon: Icons.point_of_sale,
                       label: 'Vender',
-                      onTap: () {
-                        Navigator.of(context).push(
-                          MaterialPageRoute(
-                            builder: (_) => const ManualSaleCatalogPage(),
-                          ),
-                        );
-                      },
+                      onTap: () => Navigator.of(context).push(
+                        MaterialPageRoute(
+                            builder: (_) => const ManualSaleCatalogPage()),
+                      ),
                     ),
                     _MenuPill(
                       icon: Icons.receipt_long,
                       label: 'Relatórios',
-                      onTap: () {
-                        ScaffoldMessenger.of(context).showSnackBar(
-                          const SnackBar(
-                            content: Text('Relatórios em breve 😊'),
-                          ),
-                        );
-                      },
+                      onTap: () => Navigator.of(context).push(
+                        MaterialPageRoute(
+                            builder: (_) => const MovementHistoryPage()),
+                      ),
                     ),
                     _MenuPill(
                       icon: Icons.inventory_rounded,
                       label: 'Entrada manual',
-                      onTap: () {
-                        Navigator.of(context).push(
-                          MaterialPageRoute(
-                            builder: (_) => const ManualEntryPage(),
-                          ),
-                        );
-                      },
+                      onTap: () => Navigator.of(context).push(
+                        MaterialPageRoute(
+                            builder: (_) => const ManualEntryPage()),
+                      ),
                     ),
                     _MenuPill(
                       icon: Icons.settings_outlined,
                       label: 'Configurações',
-                      onTap: () {
-                        Navigator.of(context).push(
-                          MaterialPageRoute(
-                            builder: (_) => const ProfilePage(),
-                          ),
-                        );
-                      },
+                      onTap: () => Navigator.of(context).push(
+                        MaterialPageRoute(builder: (_) => const ProfilePage()),
+                      ),
                     ),
                   ],
                 ),
+
                 const SizedBox(height: 16),
 
-                // Card — Saldo em estoque + botão verde
+                // Card “Saldo em estoque” com botão
                 _StockCard(
                   totalText: _fmtCurrency(saldoEstoque),
                   onConsultar: onConsultarEstoque,
@@ -216,7 +194,6 @@ class _BigStatCard extends StatelessWidget {
   final String title;
   final String value;
   const _BigStatCard({required this.title, required this.value});
-
   @override
   Widget build(BuildContext context) {
     return Card(
@@ -242,14 +219,12 @@ class _TagCard extends StatelessWidget {
   final Color color;
   final Color onColor;
   final IconData icon;
-  const _TagCard({
-    required this.title,
-    required this.value,
-    required this.color,
-    required this.onColor,
-    required this.icon,
-  });
-
+  const _TagCard(
+      {required this.title,
+      required this.value,
+      required this.color,
+      required this.onColor,
+      required this.icon});
   @override
   Widget build(BuildContext context) {
     return Card(
@@ -267,13 +242,12 @@ class _TagCard extends StatelessWidget {
                 children: [
                   Text(title, style: TextStyle(color: onColor)),
                   const SizedBox(height: 4),
-                  Text(
-                    value,
-                    style: Theme.of(context).textTheme.headlineSmall?.copyWith(
-                          color: onColor,
-                          fontWeight: FontWeight.w700,
-                        ),
-                  ),
+                  Text(value,
+                      style: Theme.of(context)
+                          .textTheme
+                          .headlineSmall
+                          ?.copyWith(
+                              color: onColor, fontWeight: FontWeight.w700)),
                 ],
               ),
             ),
@@ -289,7 +263,6 @@ class _MenuPill extends StatelessWidget {
   final String label;
   final VoidCallback? onTap;
   const _MenuPill({required this.icon, required this.label, this.onTap});
-
   @override
   Widget build(BuildContext context) {
     return Material(
@@ -318,7 +291,6 @@ class _StockCard extends StatelessWidget {
   final String totalText;
   final VoidCallback onConsultar;
   const _StockCard({required this.totalText, required this.onConsultar});
-
   @override
   Widget build(BuildContext context) {
     return Card(
@@ -339,8 +311,7 @@ class _StockCard extends StatelessWidget {
                   backgroundColor: Colors.tealAccent.shade400,
                   foregroundColor: Colors.black87,
                   shape: RoundedRectangleBorder(
-                    borderRadius: BorderRadius.circular(28),
-                  ),
+                      borderRadius: BorderRadius.circular(28)),
                   padding: const EdgeInsets.symmetric(vertical: 14),
                 ),
                 onPressed: onConsultar,

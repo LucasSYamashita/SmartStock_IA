@@ -1,11 +1,13 @@
 // lib/features/products/product_list_page.dart
-import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
+import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../tenant/tenant_provider.dart';
 import 'products_providers.dart';
+import '../../data/models/product.dart';
+import 'product_detail_page.dart'; // <-- NOVO
 
 class ProductListPage extends ConsumerWidget {
   const ProductListPage({super.key});
@@ -15,7 +17,6 @@ class ProductListPage extends ConsumerWidget {
     final tenantId = ref.watch(tenantIdProvider);
     final async = ref.watch(productsStreamProvider);
 
-    // Banner de debug/ação
     Widget topBar = const SizedBox.shrink();
     if (tenantId != null && tenantId.isNotEmpty) {
       final uid = FirebaseAuth.instance.currentUser?.uid ?? '?';
@@ -72,7 +73,6 @@ class ProductListPage extends ConsumerWidget {
                     'email': me.email ?? '',
                     'joinedAt': FieldValue.serverTimestamp(),
                   }, SetOptions(merge: true));
-                  // reabrir stream
                   ref.invalidate(productsStreamProvider);
                   if (context.mounted) {
                     ScaffoldMessenger.of(context).showSnackBar(
@@ -81,9 +81,8 @@ class ProductListPage extends ConsumerWidget {
                   }
                 } catch (e) {
                   if (context.mounted) {
-                    ScaffoldMessenger.of(context).showSnackBar(
-                      SnackBar(content: Text('Falhou: $e')),
-                    );
+                    ScaffoldMessenger.of(context)
+                        .showSnackBar(SnackBar(content: Text('Falhou: $e')));
                   }
                 }
               },
@@ -132,16 +131,19 @@ class ProductListPage extends ConsumerWidget {
                   final p = items[i];
                   final baixo = p.quantidade <= p.estoqueMinimo;
                   return ListTile(
+                    onTap: () {
+                      Navigator.of(context).push(
+                        MaterialPageRoute(
+                          builder: (_) => ProductDetailPage(productId: p.id),
+                        ),
+                      );
+                    },
                     leading: CircleAvatar(
                       child: Text(
-                        p.nome.isNotEmpty ? p.nome[0].toUpperCase() : '?',
-                      ),
+                          p.nome.isNotEmpty ? p.nome[0].toUpperCase() : '?'),
                     ),
-                    title: Text(
-                      p.nome,
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                    ),
+                    title: Text(p.nome,
+                        maxLines: 1, overflow: TextOverflow.ellipsis),
                     subtitle: Text([
                       if (p.categoria.isNotEmpty) p.categoria,
                       if ((p.sku ?? '').isNotEmpty) 'SKU ${p.sku!}',
@@ -151,17 +153,12 @@ class ProductListPage extends ConsumerWidget {
                       mainAxisAlignment: MainAxisAlignment.center,
                       crossAxisAlignment: CrossAxisAlignment.end,
                       children: [
-                        Text(
-                          'Qtd ${p.quantidade}',
-                          style: TextStyle(
-                            fontWeight: FontWeight.w600,
-                            color: baixo ? Colors.red : null,
-                          ),
-                        ),
-                        Text(
-                          'R\$ ${p.preco.toStringAsFixed(2)}',
-                          style: Theme.of(context).textTheme.labelSmall,
-                        ),
+                        Text('Qtd ${p.quantidade}',
+                            style: TextStyle(
+                                fontWeight: FontWeight.w600,
+                                color: baixo ? Colors.red : null)),
+                        Text('R\$ ${p.preco.toStringAsFixed(2)}',
+                            style: Theme.of(context).textTheme.labelSmall),
                       ],
                     ),
                   );
@@ -184,14 +181,11 @@ class _Hint extends StatelessWidget {
     return Center(
       child: Padding(
         padding: const EdgeInsets.all(24),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Icon(icon, size: 40),
-            const SizedBox(height: 8),
-            Text(text, textAlign: TextAlign.center),
-          ],
-        ),
+        child: Column(mainAxisSize: MainAxisSize.min, children: [
+          Icon(icon, size: 40),
+          const SizedBox(height: 8),
+          Text(text, textAlign: TextAlign.center),
+        ]),
       ),
     );
   }

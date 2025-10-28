@@ -1,192 +1,144 @@
+// lib/data/datasources/stock_service.dart
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 
-/// Linhas de venda (saída de estoque)
 class SaleLine {
   final String produtoId;
   final int qty;
   final double unitPrice;
-  const SaleLine(
-      {required this.produtoId, required this.qty, required this.unitPrice});
+  const SaleLine({
+    required this.produtoId,
+    required this.qty,
+    required this.unitPrice,
+  });
 }
 
-/// Linhas de entrada/compra (entrada de estoque)
 class InboundLine {
   final String produtoId;
   final int qty;
   final double unitCost;
-  const InboundLine(
-      {required this.produtoId, required this.qty, required this.unitCost});
+  const InboundLine({
+    required this.produtoId,
+    required this.qty,
+    required this.unitCost,
+  });
 }
 
 class StockService {
-  final FirebaseFirestore db;
-  final String tenantId;
-  StockService(this.db, this.tenantId);
+  static FirebaseFirestore get _db => FirebaseFirestore.instance;
+  static String get _uid => FirebaseAuth.instance.currentUser!.uid;
 
-  /// Atualiza somente os campos permitidos nas rules de produtos.
-  Future<void> updateProductQty({
-    required String productId,
-    required int newQty,
-  }) async {
-    final uid = FirebaseAuth.instance.currentUser!.uid;
-    await db
-        .collection('tenants')
-        .doc(tenantId)
-        .collection('produtos')
-        .doc(productId)
-        .update({
-      'quantidade': newQty,
-      'updatedAt': FieldValue.serverTimestamp(),
-      'updatedBy': uid,
-    });
-  }
-
-  /// Cria uma VENDA em /vendas, gera MOVIMENTOS de 'saida' e aplica a baixa nos produtos.
-  /// Tudo em uma única transação para consistência.
-  Future<void> createSaleAndApply({
+  /// VENDA (baixa estoque + grava movimento + grava documento de venda)
+  static Future<void> createSaleAndApply({
+    required String tenantId,
     required List<SaleLine> lines,
-    required String usuarioId,
-    required double total,
-    String? pagamento,
-    String origem = 'manual_sale',
+    required String paymentMethod, // 'PIX'|'Crédito'|'Débito'|'Dinheiro'|etc
+    String paymentNote = '',
+    String origem = 'app',
   }) async {
-    if (lines.isEmpty) throw Exception('Sem itens');
+    final tenantRef = _db.collection('tenants').doc(tenantId);
+    final produtosCol = tenantRef.collection('produtos');
+    final movimentosCol = tenantRef.collection('movimentos');
+    final vendasCol = tenantRef.collection('vendas');
 
-    final vendaRef =
-        db.collection('tenants').doc(tenantId).collection('vendas').doc();
+    await _db.runTransaction((tx) async {
+      double total = 0;
 
-    await db.runTransaction((tx) async {
-      // 1) lê todos os produtos usados
-      final Map<String, DocumentSnapshot<Map<String, dynamic>>> prods = {};
       for (final l in lines) {
-        final ref = db
-            .collection('tenants')
-            .doc(tenantId)
-            .collection('produtos')
-            .doc(l.produtoId);
-        prods[l.produtoId] = await tx.get(ref);
-        if (!prods[l.produtoId]!.exists) {
-          throw Exception('Produto ${l.produtoId} não encontrado');
-        }
-      }
-
-      // 2) cria a venda (rules: itens list, subtotal/total number, pagamento string opcional, usuarioId, createdAt)
-      tx.set(vendaRef, {
-        'itens': [
-          for (final l in lines)
-            {'produtoId': l.produtoId, 'qty': l.qty, 'unitPrice': l.unitPrice}
-        ],
-        'subtotal': total, // se tiver descontos, calcule e ajuste
-        'total': total,
-        'pagamento': (pagamento ?? ''),
-        'usuarioId': usuarioId,
-        'createdAt': FieldValue.serverTimestamp(),
-      });
-
-      // 3) para cada item, cria movimento SAÍDA e atualiza produto
-      for (final l in lines) {
-        final prodRef = db
-            .collection('tenants')
-            .doc(tenantId)
-            .collection('produtos')
-            .doc(l.produtoId);
-
-        final int atual =
-            (prods[l.produtoId]!.data()?['quantidade'] ?? 0) as int;
-        final int novo = (atual - l.qty) < 0 ? 0 : (atual - l.qty);
-
-        final movRef = db
-            .collection('tenants')
-            .doc(tenantId)
-            .collection('movimentos')
-            .doc();
-
-        tx.set(movRef, {
-          'tipo': 'saida',
-          'quantidade': l.qty,
-          'produtoId': l.produtoId,
-          'usuarioId': usuarioId,
-          'motivo': 'venda',
-          'origem': origem,
-          'mensagemOriginal': '',
-          'createdAt': FieldValue.serverTimestamp(),
-        });
-
-        tx.update(prodRef, {
-          'quantidade': novo,
-          'updatedAt': FieldValue.serverTimestamp(),
-          'updatedBy': usuarioId,
-        });
-      }
-    });
-  }
-
-  /// Gera movimentos de ENTRADA e atualiza produtos (sem criar documento em /vendas).
-  Future<void> createInboundAndApply({
-    required List<InboundLine> lines,
-    required String usuarioId,
-    String origem = 'manual_entry',
-    String? motivo,
-  }) async {
-    if (lines.isEmpty) throw Exception('Sem itens');
-
-    await db.runTransaction((tx) async {
-      for (final l in lines) {
-        final prodRef = db
-            .collection('tenants')
-            .doc(tenantId)
-            .collection('produtos')
-            .doc(l.produtoId);
+        final prodRef = produtosCol.doc(l.produtoId);
         final snap = await tx.get(prodRef);
         if (!snap.exists) {
-          throw Exception('Produto ${l.produtoId} não encontrado');
+          throw StateError('Produto não encontrado: ${l.produtoId}');
         }
-        final int atual = (snap.data()?['quantidade'] ?? 0) as int;
-        final int novo = atual + l.qty;
 
-        final movRef = db
-            .collection('tenants')
-            .doc(tenantId)
-            .collection('movimentos')
-            .doc();
+        final data = snap.data() as Map<String, dynamic>;
+        final nome = (data['nome'] ?? '').toString();
+        final qtdAtualAny = data['quantidade'] ?? 0;
+        final qtdAtual = qtdAtualAny is num
+            ? qtdAtualAny.toInt()
+            : int.tryParse('$qtdAtualAny') ?? 0;
 
-        tx.set(movRef, {
-          'tipo': 'entrada',
-          'quantidade': l.qty,
+        final novoSaldo = qtdAtual - l.qty;
+        if (novoSaldo < 0) {
+          throw StateError('Estoque insuficiente para $nome');
+        }
+
+        tx.update(prodRef, {
+          'quantidade': novoSaldo,
+          'updatedAt': FieldValue.serverTimestamp(),
+          'updatedBy': _uid,
+        });
+
+        tx.set(movimentosCol.doc(), {
           'produtoId': l.produtoId,
-          'usuarioId': usuarioId,
-          'motivo': motivo ?? '',
+          'produtoNome': nome,
+          'tipo': 'saida',
+          'quantidade': l.qty,
+          'motivo': 'venda',
           'origem': origem,
-          'mensagemOriginal': '',
+          'usuarioId': _uid,
+          'paymentMethod': paymentMethod,
+          if (paymentNote.isNotEmpty) 'paymentNote': paymentNote,
           'createdAt': FieldValue.serverTimestamp(),
         });
 
-        tx.update(prodRef, {
-          'quantidade': novo,
-          'updatedAt': FieldValue.serverTimestamp(),
-          'updatedBy': usuarioId,
-        });
+        total += l.qty * l.unitPrice;
       }
+
+      tx.set(vendasCol.doc(), {
+        'total': total,
+        'usuarioId': _uid,
+        'origem': origem,
+        'paymentMethod': paymentMethod,
+        if (paymentNote.isNotEmpty) 'paymentNote': paymentNote,
+        'createdAt': FieldValue.serverTimestamp(),
+      });
     });
   }
 
-  /// Resumo para a IA responder.
-  Future<({int itens, double valor})> getTotals() async {
-    final snap = await db
-        .collection('tenants')
-        .doc(tenantId)
-        .collection('produtos')
-        .get();
-    int itens = 0;
-    double valor = 0.0;
-    for (final d in snap.docs) {
-      final q = (d.data()['quantidade'] ?? 0) as int;
-      final pAny = d.data()['preco'];
-      final p = pAny is num ? pAny.toDouble() : 0.0;
-      itens += q;
-      valor += q * p;
-    }
-    return (itens: itens, valor: valor);
+  /// ENTRADA (reposição) + grava movimento
+  static Future<void> createInboundAndApply({
+    required String tenantId,
+    required List<InboundLine> lines,
+    String motivo = 'compra',
+    String origem = 'app',
+  }) async {
+    final tenantRef = _db.collection('tenants').doc(tenantId);
+    final produtosCol = tenantRef.collection('produtos');
+    final movimentosCol = tenantRef.collection('movimentos');
+
+    await _db.runTransaction((tx) async {
+      for (final l in lines) {
+        final prodRef = produtosCol.doc(l.produtoId);
+        final snap = await tx.get(prodRef);
+        if (!snap.exists) {
+          throw StateError('Produto não encontrado: ${l.produtoId}');
+        }
+
+        final data = snap.data() as Map<String, dynamic>;
+        final nome = (data['nome'] ?? '').toString();
+        final qtdAtualAny = data['quantidade'] ?? 0;
+        final qtdAtual = qtdAtualAny is num
+            ? qtdAtualAny.toInt()
+            : int.tryParse('$qtdAtualAny') ?? 0;
+
+        tx.update(prodRef, {
+          'quantidade': qtdAtual + l.qty,
+          'updatedAt': FieldValue.serverTimestamp(),
+          'updatedBy': _uid,
+        });
+
+        tx.set(movimentosCol.doc(), {
+          'produtoId': l.produtoId,
+          'produtoNome': nome,
+          'tipo': 'entrada',
+          'quantidade': l.qty,
+          'motivo': motivo,
+          'origem': origem,
+          'usuarioId': _uid,
+          'createdAt': FieldValue.serverTimestamp(),
+        });
+      }
+    });
   }
 }

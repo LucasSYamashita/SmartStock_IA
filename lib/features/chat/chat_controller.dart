@@ -1,69 +1,50 @@
-// lib/features/chat/chat_controller.dart
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'chat_service.dart';
 
 class ChatMessage {
   final String role; // 'user' | 'assistant'
   final String content;
-  const ChatMessage({required this.role, required this.content});
-
-  Map<String, String> toMap() => {'role': role, 'content': content};
+  ChatMessage(this.role, this.content);
 }
 
-final chatControllerProvider =
-    StateNotifierProvider<ChatController, List<ChatMessage>>(
-  (ref) => ChatController(ChatService(ref)),
-);
+class ChatState {
+  final List<ChatMessage> items;
+  const ChatState({this.items = const []});
+  ChatState add(ChatMessage m) => ChatState(items: [...items, m]);
+}
 
-class ChatController extends StateNotifier<List<ChatMessage>> {
-  ChatController(this._svc) : super(const []);
+class ChatController extends StateNotifier<ChatState> {
   final ChatService _svc;
+  final String tenantId;
+  final String role;
 
-  bool _streaming = false;
+  ChatController({
+    required ChatService service,
+    required this.tenantId,
+    required this.role,
+  })  : _svc = service,
+        super(const ChatState());
 
-  Future<void> send(String text, {bool tryActWhenPossible = false}) async {
-    final input = text.trim();
-    if (input.isEmpty) return;
-
-    final history = [...state, ChatMessage(role: 'user', content: input)];
-    state = history;
-
-    try {
-      // se quiser acionar automações, você pode usar tryActWhenPossible e _svc.act aqui
-      final answer = await _svc.chatOnce(
-        history: history.map((m) => m.toMap()).toList(),
-      );
-      state = [...history, ChatMessage(role: 'assistant', content: answer)];
-    } catch (e) {
-      state = [...history, ChatMessage(role: 'assistant', content: 'Erro: $e')];
-    }
+  void addLocal(String role, String text) {
+    if (!mounted) return;
+    state = state.add(ChatMessage(role, text));
   }
 
-  Future<void> sendStreaming(String text) async {
-    final input = text.trim();
-    if (input.isEmpty || _streaming) return;
-
-    final history = [...state, ChatMessage(role: 'user', content: input)];
-    state = [...history, const ChatMessage(role: 'assistant', content: '')];
-
-    final idx = state.length - 1;
-    _streaming = true;
+  Future<void> send(String text) async {
+    addLocal('user', text);
     try {
-      final stream = _svc.chatStream(
-        history: history.map((m) => m.toMap()).toList(),
+      final replies = await _svc.actStepwise(
+        tenantId: tenantId,
+        role: role,
+        text: text,
       );
-      await for (final delta in stream) {
-        final curr = state[idx].content + delta;
-        final updated = [...state];
-        updated[idx] = ChatMessage(role: 'assistant', content: curr);
-        state = updated;
+      for (final r in replies) {
+        if (!mounted) return;
+        state = state.add(ChatMessage('assistant', r));
       }
     } catch (e) {
-      final updated = [...state];
-      updated[idx] = ChatMessage(role: 'assistant', content: 'Erro: $e');
-      state = updated;
-    } finally {
-      _streaming = false;
+      if (!mounted) return;
+      state = state.add(ChatMessage('assistant', 'ERRO: $e'));
     }
   }
 }
