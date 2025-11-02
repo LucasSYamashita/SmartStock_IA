@@ -27,14 +27,36 @@ class _HomePageState extends ConsumerState<HomePage> {
   Widget build(BuildContext context) {
     final mode = ref.watch(themeModeProvider);
     final tenantId = ref.watch(tenantIdProvider); // pode ser null
-    final isAdmin = tenantId == null
-        ? false
-        : ref.watch(isAdminProvider(tenantId)); // family precisa do tenantId
+
+    // role: admin > staff > viewer
+    final isAdmin =
+        tenantId == null ? false : ref.watch(isAdminProvider(tenantId));
+    final isStaff =
+        tenantId == null ? false : ref.watch(isStaffProvider(tenantId));
+    final role = isAdmin ? 'admin' : (isStaff ? 'staff' : 'viewer');
+
+    // Aba do Chat: se não houver tenant, mostra aviso simples
+    final Widget chatTab = tenantId == null || tenantId.isEmpty
+        ? Center(
+            child: Padding(
+              padding: const EdgeInsets.all(24),
+              child: Text(
+                'Nenhuma loja ativa.\nAbra/entre em uma loja para usar o Chat.',
+                textAlign: TextAlign.center,
+                style: Theme.of(context).textTheme.titleMedium,
+              ),
+            ),
+          )
+        : ChatPage(
+            tenantId: tenantId,
+            role: role,
+          );
 
     final pages = <Widget>[
       DashboardPage(onConsultarEstoque: () => setState(() => index = 1)),
       const RequireMember(child: ProductListPage()),
-      const RequireMember(child: ChatPage()),
+      // ⚠️ Sem const aqui; passamos tenantId/role dinamicamente
+      RequireMember(child: chatTab),
       const ProfilePage(),
     ];
 
@@ -127,9 +149,9 @@ class _HomePageState extends ConsumerState<HomePage> {
   /// Diálogo: criar produto + LOG de entrada inicial (sem travar a UI se o log falhar)
   Future<void> _addProduct(BuildContext context) async {
     final nameCtrl = TextEditingController();
-    final brandCtrl = TextEditingController(); // só visual
+    final brandCtrl = TextEditingController(); // apenas visual
     final qtdCtrl = TextEditingController(text: '0');
-    final minCtrl = TextEditingController(text: '0');
+    final minCtrl = TextEditingController(text: '1'); // padrão 1
     final priceCtrl = TextEditingController(text: '0');
 
     String? err;
@@ -146,7 +168,7 @@ class _HomePageState extends ConsumerState<HomePage> {
 
             final nome = nameCtrl.text.trim();
             final quantidade = int.tryParse(qtdCtrl.text.trim()) ?? 0;
-            final minimo = int.tryParse(minCtrl.text.trim()) ?? 0;
+            final minimo = int.tryParse(minCtrl.text.trim()) ?? 1;
             final preco = _parsePreco(priceCtrl.text);
 
             if (nome.isEmpty) {

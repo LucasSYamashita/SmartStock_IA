@@ -30,7 +30,6 @@ class QueryIntent extends Intent {
 Intent? _tryMove(String text) {
   final t = text.trim().toLowerCase();
 
-  // ENTRADA: "entrada 5 do X", "entrada de 5 X", "adicionar 3 da Y", "somar 2 Z"
   final reIn = RegExp(
     r'^(?:\s*)(?:entrada|adicionar|somar|soma(?:r)?)\s+(?:de\s+)?(\d+)\s+(?:(?:do|da|de|dos|das)\s+)?(.+)$',
     caseSensitive: false,
@@ -50,7 +49,6 @@ Intent? _tryMove(String text) {
     }
   }
 
-  // SAÍDA: "vendi 2 do X", "saida 1 X", "retirei 3 da Y", "baixar 4 Z"
   final reOut = RegExp(
     r'^(?:\s*)(?:vendi|venda|sa[ií]da|retirei|retirar|baixar?)\s+(\d+)\s+(?:(?:do|da|de|dos|das)\s+)?(.+)$',
     caseSensitive: false,
@@ -76,7 +74,6 @@ Intent? _tryMove(String text) {
 Intent? _tryQuery(String text) {
   final t = text.trim().toLowerCase();
 
-  // CONSULTA: "quanto tem do X", "qtd do Y", "quantidade Z", "estoque de W"
   final re = RegExp(
     r'^(?:\s*)(?:quanto\s+tem|qtd|quantidade|estoque(?:\s+(?:do|da|de|dos|das))?)\s+(?:(?:do|da|de|dos|das)\s+)?(.+)$',
     caseSensitive: false,

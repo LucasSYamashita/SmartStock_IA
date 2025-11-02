@@ -1,145 +1,97 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-
-import 'chat_controller.dart';
-import 'chat_service.dart';
-
-// providers do app
 import '../tenant/tenant_provider.dart';
 import '../tenant/role_providers.dart';
+import 'chat_controller.dart';
 
-final _chatServiceProvider = Provider<ChatService>((ref) => ChatService());
-
-final chatControllerProvider =
-    StateNotifierProvider<ChatController, ChatState>((ref) {
-  final tenantId = ref.watch(tenantIdProvider) ?? '';
-  // role: admin > staff > viewer
-  final isAdmin =
-      tenantId.isNotEmpty ? ref.watch(isAdminProvider(tenantId)) : false;
-  final isStaff =
-      tenantId.isNotEmpty ? ref.watch(isStaffProvider(tenantId)) : false;
-  final role = isAdmin ? 'admin' : (isStaff ? 'staff' : 'viewer');
-
-  return ChatController(
-    service: ref.read(_chatServiceProvider),
-    tenantId: tenantId,
-    role: role,
-  );
-});
-
-class ChatPage extends ConsumerStatefulWidget {
-  const ChatPage({super.key});
+class ChatPage extends ConsumerWidget {
+  final String tenantId;
+  final String role;
+  const ChatPage({super.key, required this.tenantId, required this.role});
 
   @override
-  ConsumerState<ChatPage> createState() => _ChatPageState();
-}
+  Widget build(BuildContext context, WidgetRef ref) {
+    final ctrl = ref.watch(
+        chatControllerProvider((tenantId: tenantId, role: role)).notifier);
+    final messages =
+        ref.watch(chatControllerProvider((tenantId: tenantId, role: role)));
 
-class _ChatPageState extends ConsumerState<ChatPage> {
-  final _input = TextEditingController();
-  bool _sending = false;
+    final txt = TextEditingController();
 
-  @override
-  void dispose() {
-    _input.dispose();
-    super.dispose();
-  }
-
-  Future<void> _send() async {
-    final txt = _input.text.trim();
-    if (txt.isEmpty || _sending) return;
-
-    setState(() => _sending = true);
-    try {
-      await ref.read(chatControllerProvider.notifier).send(txt);
-      _input.clear();
-    } finally {
-      if (mounted) setState(() => _sending = false);
-    }
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final state = ref.watch(chatControllerProvider);
-    final tenantId = ref.watch(tenantIdProvider) ?? '';
-
-    return Column(
-      children: [
-        if (tenantId.isEmpty)
-          Container(
-            width: double.infinity,
-            color: Theme.of(context).colorScheme.errorContainer,
-            padding: const EdgeInsets.all(12),
-            child: Text(
-              'Nenhuma loja ativa. Abra/entre em uma loja para usar o Chat.',
-              style: TextStyle(
-                color: Theme.of(context).colorScheme.onErrorContainer,
-              ),
+    return Scaffold(
+      body: Column(
+        children: [
+          Padding(
+            padding: const EdgeInsets.fromLTRB(16, 12, 16, 8),
+            child: Align(
+              alignment: Alignment.centerLeft,
+              child: Text('Tenant: $tenantId · Role: $role',
+                  style: Theme.of(context).textTheme.labelMedium),
             ),
           ),
-        Expanded(
-          child: ListView.builder(
-            padding: const EdgeInsets.all(12),
-            itemCount: state.items.length,
-            itemBuilder: (_, i) {
-              final m = state.items[i];
-              final mine = m.role == 'user';
-              return Align(
-                alignment: mine ? Alignment.centerRight : Alignment.centerLeft,
-                child: Container(
-                  margin: const EdgeInsets.symmetric(vertical: 6),
-                  padding:
-                      const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
-                  decoration: BoxDecoration(
-                    color: mine
-                        ? Theme.of(context).colorScheme.primaryContainer
-                        : Theme.of(context).colorScheme.surfaceVariant,
-                    borderRadius: BorderRadius.circular(16),
-                  ),
-                  child: Text(
-                    m.content,
-                    style: TextStyle(
-                      color: mine
-                          ? Theme.of(context).colorScheme.onPrimaryContainer
-                          : Theme.of(context).colorScheme.onSurfaceVariant,
+          Expanded(
+            child: ListView.builder(
+              padding: const EdgeInsets.all(12),
+              itemCount: messages.length,
+              itemBuilder: (_, i) {
+                final m = messages[i];
+                final isUser = m.role == 'user';
+                return Align(
+                  alignment:
+                      isUser ? Alignment.centerRight : Alignment.centerLeft,
+                  child: Container(
+                    margin: const EdgeInsets.symmetric(vertical: 6),
+                    padding: const EdgeInsets.symmetric(
+                        vertical: 10, horizontal: 14),
+                    decoration: BoxDecoration(
+                      color: isUser
+                          ? const Color(0xFF1B5E20)
+                          : const Color(0xFF424242),
+                      borderRadius: BorderRadius.circular(16),
                     ),
+                    child: Text(m.content,
+                        style: const TextStyle(color: Colors.white)),
+                  ),
+                );
+              },
+            ),
+          ),
+          const SizedBox(height: 6),
+          Padding(
+            padding: const EdgeInsets.fromLTRB(8, 0, 8, 8),
+            child: Row(
+              children: [
+                Expanded(
+                  child: TextField(
+                    controller: txt,
+                    decoration: const InputDecoration(
+                      hintText:
+                          'ex.: entrada coca-cola • depois: 10 unidades • depois: a 10 ou "pular"',
+                      filled: true,
+                    ),
+                    onSubmitted: (_) async {
+                      final t = txt.text.trim();
+                      if (t.isEmpty) return;
+                      await ctrl.send(t);
+                      txt.clear();
+                    },
                   ),
                 ),
-              );
-            },
-          ),
-        ),
-        SafeArea(
-          top: false,
-          minimum: const EdgeInsets.fromLTRB(12, 0, 12, 12),
-          child: Row(
-            children: [
-              Expanded(
-                child: TextField(
-                  controller: _input,
-                  decoration: const InputDecoration(
-                    hintText: 'Digite aqui… ex.: entrada de 5 sabonetes a 10',
-                    border: OutlineInputBorder(),
-                    isDense: true,
-                  ),
-                  onSubmitted: (_) => _send(),
+                const SizedBox(width: 8),
+                FilledButton(
+                  onPressed: () async {
+                    final t = txt.text.trim();
+                    if (t.isEmpty) return;
+                    await ctrl.send(t);
+                    txt.clear();
+                  },
+                  child: const Text('Enviar'),
                 ),
-              ),
-              const SizedBox(width: 8),
-              FilledButton.icon(
-                onPressed:
-                    (tenantId.isEmpty || _sending) ? null : () => _send(),
-                icon: _sending
-                    ? const SizedBox(
-                        width: 16,
-                        height: 16,
-                        child: CircularProgressIndicator(strokeWidth: 2))
-                    : const Icon(Icons.send),
-                label: const Text('Enviar'),
-              ),
-            ],
+              ],
+            ),
           ),
-        ),
-      ],
+        ],
+      ),
     );
   }
 }

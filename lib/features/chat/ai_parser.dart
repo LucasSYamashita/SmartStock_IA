@@ -6,11 +6,12 @@ class AiParsedOp {
   final String produtoNome;
   final String? motivo;
 
-  AiParsedOp(
-      {required this.tipo,
-      required this.quantidade,
-      required this.produtoNome,
-      this.motivo});
+  AiParsedOp({
+    required this.tipo,
+    required this.quantidade,
+    required this.produtoNome,
+    this.motivo,
+  });
 
   factory AiParsedOp.fromMap(Map<String, dynamic> m) => AiParsedOp(
         tipo: (m['tipo'] ?? '').toString(),
