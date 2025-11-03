@@ -1,78 +1,65 @@
-import 'dart:math';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'chat_models.dart';
 import 'chat_service.dart';
+import 'dart:math';
 
-class ChatMessage {
-  final String role; // 'user' | 'assistant'
-  final String content;
-  ChatMessage(this.role, this.content);
-}
-
-/// estado de preenchimento progressivo (produto -> quantidade -> preço)
-class PendingIntent {
-  String? produto;
-  int? quantidade;
-  double? preco;
-
-  Map<String, dynamic> toHint() => {
-        if (produto != null) 'produto': produto,
-        if (quantidade != null) 'quantidade': quantidade,
-        if (preco != null) 'preco': preco,
-      };
-
-  void mergeFromText(String text) {
-    final low = text.toLowerCase();
-    final pProd = RegExp(
-            r'(?:entrada\s+(?:de|em)\s+|(?:de|em)\s+)([\p{L}\s\-]+)$',
-            unicode: true)
-        .firstMatch(low);
-    if (pProd != null) {
-      produto = pProd.group(1)!.trim();
-    }
-    final q =
-        RegExp(r'(\d+)\s*(?:un|un\.|unidade|unidades)?\b').firstMatch(low);
-    if (q != null) {
-      quantidade = int.tryParse(q.group(1)!);
-    }
-    final p = RegExp(r'(?:\ba\s+|\bpor\s+|r\$\s*)(\d+(?:[.,]\d+)?)\b')
-        .firstMatch(low);
-    if (p != null) {
-      preco = double.tryParse(p.group(1)!.replaceAll(',', '.'));
-    }
-  }
-}
-
-class ChatController {
-  final ChatService _svc;
+class ChatArgs {
   final String tenantId;
   final String role;
+  const ChatArgs({required this.tenantId, required this.role});
+}
 
-  ChatController(
-      {required this.tenantId, required this.role, ChatService? service})
-      : _svc = service ?? ChatService();
+class ChatController extends StateNotifier<List<ChatMessage>> {
+  final ChatService _svc;
+  final ChatArgs _args;
 
-  final List<Map<String, String>> _messages = []; // mantém contexto curto
+  ChatController(this._svc, this._args) : super(const []);
 
-  Future<String> send(String userText) async {
-    _messages.add({'role': 'user', 'content': userText});
+  Future<void> send(String text) async {
+    final trimmed = text.trim();
+    if (trimmed.isEmpty) return;
 
-    final data = await _svc.actCall(
-      tenantId: tenantId,
-      role: role,
-      messages: _messages,
-    );
+    final reqId = _makeRequestId();
+    // mostra a mensagem do usuário imediatamente
+    state = [
+      ...state,
+      ChatMessage(id: reqId, from: 'user', text: trimmed),
+    ];
 
-    final assistant = (data['assistant_text'] ?? '') as String;
-    _messages.add({'role': 'assistant', 'content': assistant});
-    return assistant;
+    try {
+      final reply = await _svc.send(
+        tenantId: _args.tenantId,
+        role: _args.role,
+        text: trimmed,
+        requestId: reqId,
+      );
+      state = [
+        ...state,
+        ChatMessage(
+            id: 'bot_${reply.requestId}', from: 'bot', text: reply.message),
+      ];
+    } catch (e) {
+      state = [
+        ...state,
+        ChatMessage(
+            id: 'err_$reqId',
+            from: 'system',
+            text: 'Erro ao chamar função: $e'),
+      ];
+    }
   }
 }
 
-/// Provider para o controller
-final chatControllerProvider = StateNotifierProvider.family<ChatController,
-    List<ChatMessage>, ({String tenantId, String role})>(
-  (ref, args) {
-    final svc = ChatServiceImpl();
-    return ChatController(svc, args.tenantId, args.role);
-  },
+/// Provider family para injetar tenant/role
+final chatControllerProvider =
+    StateNotifierProvider.family<ChatController, List<ChatMessage>, ChatArgs>(
+  (ref, args) => ChatController(ChatService(), args),
 );
+
+/// mesmo gerador usado no service (evita nextInt(0))
+String _makeRequestId() => _makeRequestIdStatic();
+String _makeRequestIdStatic() {
+  const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+  final rnd = Random.secure();
+  return List.generate(10, (_) => chars[rnd.nextInt(chars.length)]).join();
+}

@@ -1,97 +1,84 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-import '../tenant/tenant_provider.dart';
-import '../tenant/role_providers.dart';
 import 'chat_controller.dart';
+import 'chat_models.dart';
 
-class ChatPage extends ConsumerWidget {
+class ChatPage extends ConsumerStatefulWidget {
   final String tenantId;
   final String role;
   const ChatPage({super.key, required this.tenantId, required this.role});
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
-    final ctrl = ref.watch(
-        chatControllerProvider((tenantId: tenantId, role: role)).notifier);
-    final messages =
-        ref.watch(chatControllerProvider((tenantId: tenantId, role: role)));
+  ConsumerState<ChatPage> createState() => _ChatPageState();
+}
 
-    final txt = TextEditingController();
+class _ChatPageState extends ConsumerState<ChatPage> {
+  final _ctrl = TextEditingController();
 
-    return Scaffold(
-      body: Column(
-        children: [
-          Padding(
-            padding: const EdgeInsets.fromLTRB(16, 12, 16, 8),
-            child: Align(
-              alignment: Alignment.centerLeft,
-              child: Text('Tenant: $tenantId · Role: $role',
-                  style: Theme.of(context).textTheme.labelMedium),
-            ),
-          ),
-          Expanded(
-            child: ListView.builder(
-              padding: const EdgeInsets.all(12),
-              itemCount: messages.length,
-              itemBuilder: (_, i) {
-                final m = messages[i];
-                final isUser = m.role == 'user';
-                return Align(
-                  alignment:
-                      isUser ? Alignment.centerRight : Alignment.centerLeft,
-                  child: Container(
-                    margin: const EdgeInsets.symmetric(vertical: 6),
-                    padding: const EdgeInsets.symmetric(
-                        vertical: 10, horizontal: 14),
-                    decoration: BoxDecoration(
-                      color: isUser
-                          ? const Color(0xFF1B5E20)
-                          : const Color(0xFF424242),
-                      borderRadius: BorderRadius.circular(16),
-                    ),
-                    child: Text(m.content,
-                        style: const TextStyle(color: Colors.white)),
+  Future<void> _send() async {
+    final text = _ctrl.text;
+    _ctrl.clear();
+    final args = ChatArgs(tenantId: widget.tenantId, role: widget.role);
+    await ref.read(chatControllerProvider(args).notifier).send(text);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final args = ChatArgs(tenantId: widget.tenantId, role: widget.role);
+    final msgs = ref.watch(chatControllerProvider(args));
+
+    return Column(
+      children: [
+        Expanded(
+          child: ListView.builder(
+            padding: const EdgeInsets.all(12),
+            itemCount: msgs.length,
+            itemBuilder: (_, i) {
+              final ChatMessage m = msgs[i];
+              final isUser = m.from == 'user';
+              final bg = m.from == 'system'
+                  ? Colors.red.shade700
+                  : (isUser ? Colors.green.shade800 : Colors.grey.shade800);
+              return Align(
+                alignment:
+                    isUser ? Alignment.centerRight : Alignment.centerLeft,
+                child: Container(
+                  margin: const EdgeInsets.symmetric(vertical: 6),
+                  padding: const EdgeInsets.all(12),
+                  decoration: BoxDecoration(
+                    color: bg,
+                    borderRadius: BorderRadius.circular(10),
                   ),
-                );
-              },
-            ),
+                  child:
+                      Text(m.text, style: const TextStyle(color: Colors.white)),
+                ),
+              );
+            },
           ),
-          const SizedBox(height: 6),
-          Padding(
-            padding: const EdgeInsets.fromLTRB(8, 0, 8, 8),
-            child: Row(
-              children: [
-                Expanded(
-                  child: TextField(
-                    controller: txt,
-                    decoration: const InputDecoration(
-                      hintText:
-                          'ex.: entrada coca-cola • depois: 10 unidades • depois: a 10 ou "pular"',
-                      filled: true,
-                    ),
-                    onSubmitted: (_) async {
-                      final t = txt.text.trim();
-                      if (t.isEmpty) return;
-                      await ctrl.send(t);
-                      txt.clear();
-                    },
+        ),
+        SafeArea(
+          top: false,
+          child: Row(
+            children: [
+              Expanded(
+                child: TextField(
+                  controller: _ctrl,
+                  decoration: const InputDecoration(
+                    hintText: 'ex.: entrada coca-cola 10 a 5,50',
+                    contentPadding: EdgeInsets.symmetric(horizontal: 12),
                   ),
+                  onSubmitted: (_) => _send(),
                 ),
-                const SizedBox(width: 8),
-                FilledButton(
-                  onPressed: () async {
-                    final t = txt.text.trim();
-                    if (t.isEmpty) return;
-                    await ctrl.send(t);
-                    txt.clear();
-                  },
-                  child: const Text('Enviar'),
-                ),
-              ],
-            ),
+              ),
+              const SizedBox(width: 8),
+              FilledButton(
+                onPressed: _send,
+                child: const Text('Enviar'),
+              ),
+            ],
           ),
-        ],
-      ),
+        ),
+      ],
     );
   }
 }

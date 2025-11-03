@@ -26,17 +26,19 @@ class _HomePageState extends ConsumerState<HomePage> {
   @override
   Widget build(BuildContext context) {
     final mode = ref.watch(themeModeProvider);
-    final tenantId = ref.watch(tenantIdProvider); // pode ser null
+    final tenantId = ref.watch(tenantIdProvider); // pode ser null/empty
 
     // role: admin > staff > viewer
-    final isAdmin =
-        tenantId == null ? false : ref.watch(isAdminProvider(tenantId));
-    final isStaff =
-        tenantId == null ? false : ref.watch(isStaffProvider(tenantId));
+    final isAdmin = (tenantId != null && tenantId.isNotEmpty)
+        ? ref.watch(isAdminProvider(tenantId))
+        : false;
+    final isStaff = (tenantId != null && tenantId.isNotEmpty)
+        ? ref.watch(isStaffProvider(tenantId))
+        : false;
     final role = isAdmin ? 'admin' : (isStaff ? 'staff' : 'viewer');
 
     // Aba do Chat: se não houver tenant, mostra aviso simples
-    final Widget chatTab = tenantId == null || tenantId.isEmpty
+    final Widget chatTab = (tenantId == null || tenantId.isEmpty)
         ? Center(
             child: Padding(
               padding: const EdgeInsets.all(24),
@@ -80,7 +82,9 @@ class _HomePageState extends ConsumerState<HomePage> {
       );
     }
 
-    final title = tenantId == null ? 'SmartStock' : 'SmartStock · $tenantId';
+    final title = (tenantId == null || tenantId.isEmpty)
+        ? 'SmartStock'
+        : 'SmartStock · $tenantId';
 
     return Scaffold(
       appBar: AppBar(
@@ -146,7 +150,7 @@ class _HomePageState extends ConsumerState<HomePage> {
     return double.tryParse(s) ?? 0.0;
   }
 
-  /// Diálogo: criar produto + LOG de entrada inicial (sem travar a UI se o log falhar)
+  /// Diálogo: criar produto (+ LOG de entrada inicial, se quantidade > 0).
   Future<void> _addProduct(BuildContext context) async {
     final nameCtrl = TextEditingController();
     final brandCtrl = TextEditingController(); // apenas visual
@@ -243,7 +247,6 @@ class _HomePageState extends ConsumerState<HomePage> {
                 }
               }
             } on FirebaseException catch (e) {
-              // Erro na criação do produto → aparece no modal
               setLocal(() => err = '${e.code}: ${e.message}');
             } catch (e) {
               setLocal(() => err = e.toString());
@@ -293,10 +296,8 @@ class _HomePageState extends ConsumerState<HomePage> {
                     const SizedBox(height: 8),
                     Align(
                       alignment: Alignment.centerLeft,
-                      child: Text(
-                        err!,
-                        style: const TextStyle(color: Colors.red),
-                      ),
+                      child:
+                          Text(err!, style: const TextStyle(color: Colors.red)),
                     ),
                   ],
                 ],

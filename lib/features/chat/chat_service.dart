@@ -1,27 +1,48 @@
+import 'dart:math';
 import 'package:cloud_functions/cloud_functions.dart';
 
+class ActReply {
+  final String requestId;
+  final bool ok;
+  final String message;
+
+  ActReply({required this.requestId, required this.ok, required this.message});
+}
+
 class ChatService {
-  final FirebaseFunctions _func;
+  final FirebaseFunctions _fx;
 
-  ChatService({FirebaseFunctions? functions})
-      : _func = functions ??
-            FirebaseFunctions.instanceFor(region: 'southamerica-east1');
+  ChatService(
+      {FirebaseFunctions? functions, String region = 'southamerica-east1'})
+      : _fx = (functions ?? FirebaseFunctions.instanceFor(region: region));
 
-  Future<Map<String, dynamic>> actCall({
+  /// Chama a callable `actCall` com o payload esperado.
+  Future<ActReply> send({
     required String tenantId,
-    required String role, // 'admin'/'staff'/'viewer' (só informativo)
-    required List<Map<String, String>>
-        messages, // [{role:'user'|'assistant', content:'...'}]
-    bool dryRun = false,
+    required String role,
+    required String text,
+    String? requestId,
   }) async {
-    final callable = _func.httpsCallable('actCall');
-    final resp = await callable.call(<String, dynamic>{
+    final callable = _fx.httpsCallable('actCall');
+    final payload = {
+      'requestId': requestId ?? _makeRequestId(),
       'tenantId': tenantId,
       'role': role,
-      'messages': messages,
-      'dryRun': dryRun,
-    });
-    // sempre objeto JSON
-    return Map<String, dynamic>.from(resp.data as Map);
+      'text': text,
+    };
+    final res = await callable.call(payload);
+    final data = Map<String, dynamic>.from(res.data as Map);
+    return ActReply(
+      requestId: data['requestId']?.toString() ?? '',
+      ok: data['ok'] == true,
+      message: data['message']?.toString() ?? 'Sem mensagem',
+    );
   }
+}
+
+/// ID robusto p/ correlacionar requisição/resposta
+String _makeRequestId() {
+  const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+  final rnd = Random.secure();
+  return List.generate(10, (_) => chars[rnd.nextInt(chars.length)]).join();
 }
