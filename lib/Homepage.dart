@@ -1,4 +1,3 @@
-// lib/Homepage.dart
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/material.dart';
@@ -8,11 +7,14 @@ import 'features/home/dashboard_page.dart';
 import 'features/products/product_list_page.dart' show ProductListPage;
 import 'features/chat/chat_page.dart';
 import 'features/auth/profile_page.dart';
-import 'features/settings/theme_mode_provider.dart';
 import 'features/tenant/tenant_provider.dart';
 import 'features/tenant/role_providers.dart';
 import 'features/tenant/membership_guard.dart';
 import 'features/sales/manual_sale_flow.dart';
+
+// tema
+import 'theme/theme_controller.dart';
+import 'theme/theme_toggle_action.dart';
 
 class HomePage extends ConsumerStatefulWidget {
   const HomePage({super.key});
@@ -25,8 +27,10 @@ class _HomePageState extends ConsumerState<HomePage> {
 
   @override
   Widget build(BuildContext context) {
-    final mode = ref.watch(themeModeProvider);
-    final tenantId = ref.watch(tenantIdProvider); // pode ser null/empty
+    // observa o tema (apenas para rebuild quando mudar)
+    ref.watch(themeModeProvider);
+
+    final tenantId = ref.watch(tenantIdProvider);
 
     // role: admin > staff > viewer
     final isAdmin = (tenantId != null && tenantId.isNotEmpty)
@@ -37,7 +41,7 @@ class _HomePageState extends ConsumerState<HomePage> {
         : false;
     final role = isAdmin ? 'admin' : (isStaff ? 'staff' : 'viewer');
 
-    // >>>>> NOVO: userId para o ChatPage
+    // userId para o ChatPage
     final currentUser = FirebaseAuth.instance.currentUser;
     final userId = currentUser?.uid ?? 'anonymous';
 
@@ -56,13 +60,12 @@ class _HomePageState extends ConsumerState<HomePage> {
         : ChatPage(
             tenantId: tenantId,
             role: role,
-            userId: userId, // <<<<< passando userId
+            userId: userId,
           );
 
     final pages = <Widget>[
       DashboardPage(onConsultarEstoque: () => setState(() => index = 1)),
       const RequireMember(child: ProductListPage()),
-      // ⚠️ Sem const aqui; passamos tenantId/role/userId dinamicamente
       RequireMember(child: chatTab),
       const ProfilePage(),
     ];
@@ -95,16 +98,7 @@ class _HomePageState extends ConsumerState<HomePage> {
       appBar: AppBar(
         title: Text(title),
         actions: [
-          IconButton(
-            tooltip: 'Alternar tema',
-            icon: Icon(
-                mode == ThemeMode.dark ? Icons.dark_mode : Icons.light_mode),
-            onPressed: () {
-              final n = ref.read(themeModeProvider.notifier);
-              n.state =
-                  mode == ThemeMode.dark ? ThemeMode.light : ThemeMode.dark;
-            },
-          ),
+          const ThemeToggleAction(), // <-- alterna e persiste
           IconButton(
             tooltip: 'Sair',
             icon: const Icon(Icons.logout),
@@ -190,7 +184,6 @@ class _HomePageState extends ConsumerState<HomePage> {
             }
 
             try {
-              // >>>>> mais seguro: evitar crash se não logado
               final user = FirebaseAuth.instance.currentUser;
               if (user == null) {
                 setLocal(() => err = 'Faça login para criar produtos.');
@@ -198,7 +191,6 @@ class _HomePageState extends ConsumerState<HomePage> {
               }
               final uid = user.uid;
 
-              // Campos compatíveis com as regras
               final data = <String, dynamic>{
                 'nome': nome,
                 'nomeLower': nome.toLowerCase(),
@@ -228,7 +220,7 @@ class _HomePageState extends ConsumerState<HomePage> {
                 const SnackBar(content: Text('Produto criado.')),
               );
 
-              // 3) Tenta registrar histórico de entrada sem afetar a UI
+              // 3) Log de entrada (best-effort)
               if (quantidade > 0) {
                 try {
                   await FirebaseFirestore.instance
@@ -245,17 +237,7 @@ class _HomePageState extends ConsumerState<HomePage> {
                     'motivo': 'cadastro inicial',
                     'createdAt': FieldValue.serverTimestamp(),
                   });
-                } catch (e) {
-                  if (context.mounted) {
-                    ScaffoldMessenger.of(context).showSnackBar(
-                      SnackBar(
-                        content: Text(
-                          'Produto salvo; não foi possível registrar histórico: $e',
-                        ),
-                      ),
-                    );
-                  }
-                }
+                } catch (_) {/* ignora erro do log */}
               }
             } on FirebaseException catch (e) {
               setLocal(() => err = '${e.code}: ${e.message}');
