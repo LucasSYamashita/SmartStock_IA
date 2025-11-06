@@ -1,6 +1,7 @@
-/// NLU simples (pt-BR) para 3 intenções:
-/// - entrada/adicionar/somar 5 do Produto X
-/// - vendi/saida/retirei/baixar 2 (do) Produto Y
+/// NLU simples (pt-BR)
+/// Intenções:
+/// - entrada/adicionar/somar/criar/cadastrar 5 (do) Produto X [a 10,00]
+/// - vendi/saida/retirei/baixar 2 (do) Produto Y [a 5]
 /// - quanto tem / qtd / quantidade / estoque (do) Produto Z
 
 abstract class Intent {
@@ -13,31 +14,44 @@ class MoveIntent extends Intent {
   final int quantidade;
   final String produtoNome;
   final String? motivo;
+  final double? preco; // opcional
+
   MoveIntent({
-    required super.originalText,
+    required String originalText,
     required this.tipo,
     required this.quantidade,
     required this.produtoNome,
     this.motivo,
-  });
+    this.preco,
+  }) : super(originalText);
 }
 
 class QueryIntent extends Intent {
   final String produtoNome;
-  QueryIntent({required super.originalText, required this.produtoNome});
+  QueryIntent({required String originalText, required this.produtoNome})
+      : super(originalText);
+}
+
+double? _parsePreco(String? raw) {
+  if (raw == null) return null;
+  final norm = raw.trim().replaceAll(',', '.');
+  final n = double.tryParse(norm);
+  return n;
 }
 
 Intent? _tryMove(String text) {
   final t = text.trim().toLowerCase();
 
-  final reIn = RegExp(
-    r'^(?:\s*)(?:entrada|adicionar|somar|soma(?:r)?)\s+(?:de\s+)?(\d+)\s+(?:(?:do|da|de|dos|das)\s+)?(.+)$',
+  // Padrão A: "entrada 10 cocacola a 10,00" | "adicionar 3 do produto x"
+  final reA = RegExp(
+    r'^(?:\s*)(?:entrada|adicionar|somar|soma(?:r)?|criar|cadastrar)\s+(?:de\s+)?(\d+)\s+(?:(?:do|da|de|dos|das)\s+)?(.+?)(?:\s+a\s+(\d+[.,]?\d*))?$',
     caseSensitive: false,
   );
-  final mIn = reIn.firstMatch(t);
-  if (mIn != null) {
-    final qtd = int.tryParse(mIn.group(1)!) ?? 0;
-    final nome = mIn.group(2)!.trim();
+  final mA = reA.firstMatch(t);
+  if (mA != null) {
+    final qtd = int.tryParse(mA.group(1)!) ?? 0;
+    final nome = mA.group(2)!.trim();
+    final preco = _parsePreco(mA.group(3));
     if (qtd > 0 && nome.isNotEmpty) {
       return MoveIntent(
         originalText: text,
@@ -45,18 +59,43 @@ Intent? _tryMove(String text) {
         quantidade: qtd,
         produtoNome: nome,
         motivo: 'chatbot',
+        preco: preco,
       );
     }
   }
 
-  final reOut = RegExp(
-    r'^(?:\s*)(?:vendi|venda|sa[ií]da|retirei|retirar|baixar?)\s+(\d+)\s+(?:(?:do|da|de|dos|das)\s+)?(.+)$',
+  // Padrão B: "entrada cocacola 10 a 10,00"
+  final reB = RegExp(
+    r'^(?:\s*)(?:entrada|adicionar|somar|soma(?:r)?|criar|cadastrar)\s+(?:(?:do|da|de|dos|das)\s+)?(.+?)\s+(\d+)(?:\s+a\s+(\d+[.,]?\d*))?$',
     caseSensitive: false,
   );
-  final mOut = reOut.firstMatch(t);
-  if (mOut != null) {
-    final qtd = int.tryParse(mOut.group(1)!) ?? 0;
-    final nome = mOut.group(2)!.trim();
+  final mB = reB.firstMatch(t);
+  if (mB != null) {
+    final nome = mB.group(1)!.trim();
+    final qtd = int.tryParse(mB.group(2)!) ?? 0;
+    final preco = _parsePreco(mB.group(3));
+    if (qtd > 0 && nome.isNotEmpty) {
+      return MoveIntent(
+        originalText: text,
+        tipo: 'entrada',
+        quantidade: qtd,
+        produtoNome: nome,
+        motivo: 'chatbot',
+        preco: preco,
+      );
+    }
+  }
+
+  // Saída (mesmas variações)
+  final reOutA = RegExp(
+    r'^(?:\s*)(?:vendi|venda|sa[ií]da|retirei|retirar|baixar?)\s+(\d+)\s+(?:(?:do|da|de|dos|das)\s+)?(.+?)(?:\s+a\s+(\d+[.,]?\d*))?$',
+    caseSensitive: false,
+  );
+  final mOutA = reOutA.firstMatch(t);
+  if (mOutA != null) {
+    final qtd = int.tryParse(mOutA.group(1)!) ?? 0;
+    final nome = mOutA.group(2)!.trim();
+    final preco = _parsePreco(mOutA.group(3));
     if (qtd > 0 && nome.isNotEmpty) {
       return MoveIntent(
         originalText: text,
@@ -64,6 +103,28 @@ Intent? _tryMove(String text) {
         quantidade: qtd,
         produtoNome: nome,
         motivo: 'chatbot',
+        preco: preco,
+      );
+    }
+  }
+
+  final reOutB = RegExp(
+    r'^(?:\s*)(?:vendi|venda|sa[ií]da|retirei|retirar|baixar?)\s+(?:(?:do|da|de|dos|das)\s+)?(.+?)\s+(\d+)(?:\s+a\s+(\d+[.,]?\d*))?$',
+    caseSensitive: false,
+  );
+  final mOutB = reOutB.firstMatch(t);
+  if (mOutB != null) {
+    final nome = mOutB.group(1)!.trim();
+    final qtd = int.tryParse(mOutB.group(2)!) ?? 0;
+    final preco = _parsePreco(mOutB.group(3));
+    if (qtd > 0 && nome.isNotEmpty) {
+      return MoveIntent(
+        originalText: text,
+        tipo: 'saida',
+        quantidade: qtd,
+        produtoNome: nome,
+        motivo: 'chatbot',
+        preco: preco,
       );
     }
   }
@@ -73,9 +134,8 @@ Intent? _tryMove(String text) {
 
 Intent? _tryQuery(String text) {
   final t = text.trim().toLowerCase();
-
   final re = RegExp(
-    r'^(?:\s*)(?:quanto\s+tem|qtd|quantidade|estoque(?:\s+(?:do|da|de|dos|das))?)\s+(?:(?:do|da|de|dos|das)\s+)?(.+)$',
+    r'^(?:\s*)(?:quanto\s+tem|qtd|quantidade|estoque)(?:\s+(?:do|da|de|dos|das))?\s+(.+)$',
     caseSensitive: false,
   );
   final m = re.firstMatch(t);

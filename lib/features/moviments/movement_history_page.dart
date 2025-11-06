@@ -14,8 +14,8 @@ class MovementHistoryPage extends ConsumerStatefulWidget {
 }
 
 class _MovementHistoryPageState extends ConsumerState<MovementHistoryPage> {
-  String _tipo = 'todos'; // todos, entrada, saida, ajuste
-  String _pay = 'todos'; // todos, pix, credito, debito, dinheiro, outros
+  String _tipo = 'todos'; // todos | entrada | saida | ajuste
+  String _pay = 'todos'; // todos | pix | credito | debito | dinheiro | outros
 
   @override
   Widget build(BuildContext context) {
@@ -24,17 +24,18 @@ class _MovementHistoryPageState extends ConsumerState<MovementHistoryPage> {
       return const Scaffold(body: Center(child: Text('Selecione uma loja.')));
     }
 
-    Query<Map<String, dynamic>> q = FirebaseFirestore.instance
+    // Só filtra por período + ordenação no servidor (não exige índice composto)
+    final q = FirebaseFirestore.instance
         .collection('tenants')
         .doc(tenantId)
         .collection('movimentos')
+        .where('createdAt',
+            isGreaterThanOrEqualTo: Timestamp.fromDate(
+              // últimos 30 dias; ajuste se quiser
+              DateTime.now().subtract(const Duration(days: 30)),
+            ))
         .orderBy('createdAt', descending: true)
-        .limit(300);
-
-    if (_tipo != 'todos') q = q.where('tipo', isEqualTo: _tipo);
-    // filtro de pagamento só tem sentido em saida
-    if (_tipo == 'saida' && _pay != 'todos')
-      q = q.where('paymentMethod', isEqualTo: _pay);
+        .limit(500);
 
     return Scaffold(
       appBar: AppBar(
@@ -65,13 +66,29 @@ class _MovementHistoryPageState extends ConsumerState<MovementHistoryPage> {
             child: StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
               stream: q.snapshots(),
               builder: (context, snap) {
-                if (snap.hasError)
+                if (snap.hasError) {
                   return Center(child: Text('Erro: ${snap.error}'));
-                if (!snap.hasData)
+                }
+                if (!snap.hasData) {
                   return const Center(child: CircularProgressIndicator());
-                final docs = snap.data!.docs;
-                if (docs.isEmpty)
+                }
+
+                // Aplica os filtros de tipo/pagamento em memória
+                final docs = snap.data!.docs.where((d) {
+                  final m = d.data();
+                  final tipo = (m['tipo'] ?? '').toString();
+                  final pay = (m['paymentMethod'] ?? '').toString();
+
+                  final tipoOk = _tipo == 'todos' || tipo == _tipo;
+                  final payOk =
+                      !(_tipo == 'saida' && _pay != 'todos') || pay == _pay;
+                  return tipoOk && payOk;
+                }).toList();
+
+                if (docs.isEmpty) {
                   return const Center(child: Text('Sem movimentações.'));
+                }
+
                 return ListView.separated(
                   itemCount: docs.length,
                   separatorBuilder: (_, __) =>
@@ -142,13 +159,14 @@ class _MovementHistoryPageState extends ConsumerState<MovementHistoryPage> {
 
   static String _fmt(DateTime dt) {
     String two(int x) => x.toString().padLeft(2, '0');
-    return '${two(dt.day)}/${two(dt.month)}/${dt.year} ${two(dt.hour)}:${two(dt.minute)}';
+    return '${two(dt.day)}/${two(dt.month)}/${dt.year} '
+        '${two(dt.hour)}:${two(dt.minute)}';
   }
 
   Future<void> _shareReport(
-      BuildContext context, Query<Map<String, dynamic>> q) async {
+      BuildContext context, Query<Map<String, dynamic>> baseQuery) async {
     try {
-      final snap = await q.limit(80).get();
+      final snap = await baseQuery.limit(120).get(); // amostra para share
       final lines = <String>['*Relatório de movimentações*'];
       if (_tipo != 'todos') lines.add('Tipo: ${_tipo.toUpperCase()}');
       if (_tipo == 'saida' && _pay != 'todos')
@@ -165,7 +183,13 @@ class _MovementHistoryPageState extends ConsumerState<MovementHistoryPage> {
         final pay = (m['paymentMethod'] ?? '').toString();
         final paySuf =
             tipo == 'SAIDA' && pay.isNotEmpty ? ' · ${_labelPay(pay)}' : '';
-        lines.add('• $tipo · $qtd × $nome · $dt$paySuf');
+
+        // aplica filtro em memória antes de adicionar
+        if ((_tipo == 'todos' || tipo == _tipo.toUpperCase()) &&
+                !(_tipo == 'saida' && _pay != 'todos') ||
+            (_pay == pay)) {
+          lines.add('• $tipo · $qtd × $nome · $dt$paySuf');
+        }
       }
 
       final text = lines.join('\n');
@@ -180,9 +204,9 @@ class _MovementHistoryPageState extends ConsumerState<MovementHistoryPage> {
   }
 
   Future<void> _exportCsv(
-      BuildContext context, Query<Map<String, dynamic>> q) async {
+      BuildContext context, Query<Map<String, dynamic>> baseQuery) async {
     try {
-      final snap = await q.get();
+      final snap = await baseQuery.get();
       final rows = <List<String>>[
         [
           'tipo',
@@ -196,26 +220,38 @@ class _MovementHistoryPageState extends ConsumerState<MovementHistoryPage> {
           'createdAt'
         ]
       ];
+
       for (final d in snap.docs) {
         final m = d.data();
+
+        // filtros em memória
+        final tipo = (m['tipo'] ?? '').toString();
+        final pay = (m['paymentMethod'] ?? '').toString();
+        final tipoOk = _tipo == 'todos' || tipo == _tipo;
+        final payOk = !(_tipo == 'saida' && _pay != 'todos') || pay == _pay;
+        if (!(tipoOk && payOk)) continue;
+
         final ts = m['createdAt'];
         final dt = ts is Timestamp ? ts.toDate().toIso8601String() : '$ts';
+
         rows.add([
-          '${m['tipo'] ?? ''}',
+          '$tipo',
           '${m['quantidade'] ?? ''}',
           '${m['produtoId'] ?? ''}',
           '${m['produtoNome'] ?? ''}',
-          '${m['paymentMethod'] ?? ''}',
+          '$pay',
           '${m['motivo'] ?? ''}',
           '${m['origem'] ?? ''}',
           '${m['usuarioId'] ?? ''}',
           dt,
         ]);
       }
+
       final csv = const _Csv().convert(rows);
       final bytes = utf8.encode(csv);
       final blob = Uri.dataFromBytes(bytes, mimeType: 'text/csv');
-      await launchUrl(blob); // dispara “download” no web
+      await launchUrl(blob); // dispara download no web
+
       if (mounted) {
         ScaffoldMessenger.of(context)
             .showSnackBar(const SnackBar(content: Text('CSV gerado.')));

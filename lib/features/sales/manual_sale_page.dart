@@ -1,3 +1,4 @@
+// lib/features/sales/manual_sale_page.dart
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/material.dart';
@@ -8,6 +9,7 @@ import 'package:share_plus/share_plus.dart';
 import '../tenant/tenant_provider.dart';
 import '../../data/datasources/firestore_movements.dart';
 import 'cart_state.dart';
+import 'sale_receipt_page.dart';
 
 String _fmt(num v) => 'R\$ ${v.toStringAsFixed(2).replaceAll('.', ',')}';
 
@@ -136,7 +138,8 @@ class _ManualSaleCatalogPageState extends ConsumerState<ManualSaleCatalogPage> {
                         ? minAny.toInt()
                         : int.tryParse('$minAny') ?? 0;
 
-                    final priceAny = m['valor'] ?? m['precoVenda'] ?? 0.0;
+                    final priceAny =
+                        m['valor'] ?? m['precoVenda'] ?? m['preco'] ?? 0.0;
                     final price = priceAny is num
                         ? priceAny.toDouble()
                         : double.tryParse('$priceAny') ?? 0.0;
@@ -248,7 +251,7 @@ class _ProductCard extends StatefulWidget {
   final String marca;
   final int estoque;
   final int minimo;
-  final int alreadyInCart; // NOVO: já no carrinho
+  final int alreadyInCart; // já no carrinho
   final double price;
   final void Function(int qtd) onAdd;
 
@@ -389,7 +392,7 @@ class _QtyStepper extends StatelessWidget {
   }
 }
 
-/// Página 2: checkout (pagamento/ desconto) e gravação + recibo
+/// Página 2: checkout (pagamento/ desconto/ cliente) e gravação + recibo
 class ManualSaleCheckoutPage extends ConsumerStatefulWidget {
   const ManualSaleCheckoutPage({super.key});
   @override
@@ -402,6 +405,7 @@ class _ManualSaleCheckoutPageState
   String method = 'pix'; // pix, dinheiro, debito, credito
   bool percent = false; // false = valor, true = porcentagem
   final _discountCtrl = TextEditingController();
+  final _customerCtrl = TextEditingController(); // nome (opcional)
 
   bool saving = false;
   String? err;
@@ -409,6 +413,7 @@ class _ManualSaleCheckoutPageState
   @override
   void dispose() {
     _discountCtrl.dispose();
+    _customerCtrl.dispose();
     super.dispose();
   }
 
@@ -443,6 +448,21 @@ class _ManualSaleCheckoutPageState
                     trailing: Text(_fmt(it.total)),
                   ),
               ],
+            ),
+          ),
+          const SizedBox(height: 12),
+
+          // cliente (opcional)
+          Card(
+            child: Padding(
+              padding: const EdgeInsets.all(12),
+              child: TextField(
+                controller: _customerCtrl,
+                decoration: const InputDecoration(
+                  labelText: 'Nome do cliente (opcional)',
+                  hintText: 'Ex.: Maria da Silva',
+                ),
+              ),
             ),
           ),
           const SizedBox(height: 12),
@@ -528,6 +548,7 @@ class _ManualSaleCheckoutPageState
                         total,
                         desconto,
                         List<CartItem>.from(items), // snapshot p/ recibo
+                        _customerCtrl.text.trim(),
                       ),
               child: Text(
                 saving ? 'Finalizando...' : 'Finalizar venda • ${_fmt(total)}',
@@ -543,6 +564,7 @@ class _ManualSaleCheckoutPageState
     double total,
     double desconto,
     List<CartItem> itemsSnapshot,
+    String clienteNome,
   ) async {
     setState(() {
       saving = true;
@@ -578,6 +600,8 @@ class _ManualSaleCheckoutPageState
         'total': total,
         'pagamento': method,
         'usuarioId': uid,
+        'clienteNome': clienteNome,
+        'origem': 'venda_manual',
         'createdAt': FieldValue.serverTimestamp(),
       });
 
@@ -591,81 +615,36 @@ class _ManualSaleCheckoutPageState
           motivo: 'venda manual',
           usuarioId: uid,
           origem: 'venda_manual',
-          mensagemOriginal: 'Venda ${vendaRef.id} • ${it.quantity}× ${it.nome}',
+          mensagemOriginal:
+              'Venda ${vendaRef.id} • ${it.quantity}× ${it.nome} (${method.toUpperCase()})',
         );
       }
 
       // 3) limpa carrinho
       ref.read(cartProvider.notifier).clear();
 
-      // 4) recibo
-      await _compartilharRecibo(
-        vendaRef.id,
-        total,
-        desconto,
-        itemsSnapshot,
-        method,
-        tenantId,
+      // 4) abre RECIBO (não volta pro menu sozinho)
+      if (!mounted) return;
+      Navigator.of(context).pushReplacement(
+        MaterialPageRoute(
+          builder: (_) => SaleReceiptPage(
+            vendaId: vendaRef.id,
+            tenantId: tenantId,
+            clienteNome: clienteNome,
+            items: itemsSnapshot,
+            subtotal: subtotal,
+            desconto: desconto,
+            total: total,
+            paymentMethod: method,
+          ),
+        ),
       );
-
-      if (mounted) Navigator.of(context).popUntil((r) => r.isFirst);
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('Venda registrada com sucesso.')),
-        );
-      }
     } on FirebaseException catch (e) {
       setState(() => err = '${e.code}: ${e.message}');
     } catch (e) {
       setState(() => err = e.toString());
     } finally {
       if (mounted) setState(() => saving = false);
-    }
-  }
-
-  Future<void> _compartilharRecibo(
-    String vendaId,
-    double total,
-    double desconto,
-    List<CartItem> items,
-    String paymentMethod,
-    String? tenantId,
-  ) async {
-    // pegar nome da loja (se existir)
-    String loja = tenantId ?? 'SmartStock';
-    try {
-      if (tenantId != null) {
-        final t = await FirebaseFirestore.instance
-            .collection('tenants')
-            .doc(tenantId)
-            .get();
-        loja = (t.data()?['name'] ?? loja).toString();
-      }
-    } catch (_) {}
-
-    final subtotal = items.fold<double>(0.0, (s, it) => s + it.total);
-    final buffer = StringBuffer()
-      ..writeln('Recibo – $loja')
-      ..writeln('Venda: $vendaId')
-      ..writeln('-----------------------------');
-
-    for (final it in items) {
-      buffer.writeln(
-          '${it.quantity}× ${it.nome} @ ${_fmt(it.unitPrice)} = ${_fmt(it.total)}');
-    }
-    buffer
-      ..writeln('-----------------------------')
-      ..writeln('Subtotal: ${_fmt(subtotal)}')
-      ..writeln('Desconto: ${_fmt(desconto)}')
-      ..writeln('Total:    ${_fmt(total)}')
-      ..writeln('Pagamento: ${paymentMethod.toUpperCase()}');
-
-    final text = buffer.toString();
-
-    try {
-      await Share.share(text); // WhatsApp, e-mail etc.
-    } catch (_) {
-      await Clipboard.setData(ClipboardData(text: text)); // fallback
     }
   }
 }

@@ -37,6 +37,10 @@ class _HomePageState extends ConsumerState<HomePage> {
         : false;
     final role = isAdmin ? 'admin' : (isStaff ? 'staff' : 'viewer');
 
+    // >>>>> NOVO: userId para o ChatPage
+    final currentUser = FirebaseAuth.instance.currentUser;
+    final userId = currentUser?.uid ?? 'anonymous';
+
     // Aba do Chat: se não houver tenant, mostra aviso simples
     final Widget chatTab = (tenantId == null || tenantId.isEmpty)
         ? Center(
@@ -52,12 +56,13 @@ class _HomePageState extends ConsumerState<HomePage> {
         : ChatPage(
             tenantId: tenantId,
             role: role,
+            userId: userId, // <<<<< passando userId
           );
 
     final pages = <Widget>[
       DashboardPage(onConsultarEstoque: () => setState(() => index = 1)),
       const RequireMember(child: ProductListPage()),
-      // ⚠️ Sem const aqui; passamos tenantId/role dinamicamente
+      // ⚠️ Sem const aqui; passamos tenantId/role/userId dinamicamente
       RequireMember(child: chatTab),
       const ProfilePage(),
     ];
@@ -185,7 +190,13 @@ class _HomePageState extends ConsumerState<HomePage> {
             }
 
             try {
-              final uid = FirebaseAuth.instance.currentUser!.uid;
+              // >>>>> mais seguro: evitar crash se não logado
+              final user = FirebaseAuth.instance.currentUser;
+              if (user == null) {
+                setLocal(() => err = 'Faça login para criar produtos.');
+                return;
+              }
+              final uid = user.uid;
 
               // Campos compatíveis com as regras
               final data = <String, dynamic>{

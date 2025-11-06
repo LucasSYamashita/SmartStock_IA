@@ -35,32 +35,32 @@ class _TenantJoinCreatePageState extends ConsumerState<TenantJoinCreatePage> {
   }
 
   Future<void> _joinByCode() async {
-    if (mounted) {
-      setState(() {
-        _working = true;
-        _err = null;
-        _ok = null;
-      });
-    }
+    setState(() {
+      _working = true;
+      _err = null;
+      _ok = null;
+    });
 
     try {
       final code = _joinCode.text.trim().toUpperCase();
       if (code.isEmpty) {
-        if (mounted) setState(() => _err = 'Informe um código.');
+        setState(() => _err = 'Informe um código.');
         return;
       }
 
       final db = FirebaseFirestore.instance;
       String? tenantId;
+      DocumentSnapshot<Map<String, dynamic>>? tenantSnap;
 
-      // 1) tenta /tenants pelo campo 'code'
+      // 1) tenta /tenants
       final byTenants = await db
           .collection('tenants')
           .where('code', isEqualTo: code)
           .limit(1)
           .get();
       if (byTenants.docs.isNotEmpty) {
-        tenantId = byTenants.docs.first.id;
+        tenantSnap = byTenants.docs.first;
+        tenantId = tenantSnap.id;
       } else {
         // 2) fallback /tenant_codes
         final byCodes = await db
@@ -70,67 +70,88 @@ class _TenantJoinCreatePageState extends ConsumerState<TenantJoinCreatePage> {
             .get();
         if (byCodes.docs.isNotEmpty) {
           tenantId = (byCodes.docs.first.data()['tenantId'] ?? '').toString();
+          if (tenantId.isNotEmpty) {
+            tenantSnap = await db.collection('tenants').doc(tenantId).get();
+          }
         }
       }
 
-      if (tenantId == null || tenantId.isEmpty) {
-        if (mounted) setState(() => _err = 'Código inválido.');
+      if (tenantId == null ||
+          tenantId.isEmpty ||
+          tenantSnap == null ||
+          !tenantSnap.exists) {
+        setState(() => _err = 'Código inválido.');
         return;
       }
 
       final me = FirebaseAuth.instance.currentUser!;
-      // cria/atualiza membership como staff (join por código)
-      await db
+      final uid = me.uid;
+
+      final userRef = db
           .collection('tenants')
           .doc(tenantId)
           .collection('usuarios')
-          .doc(me.uid)
-          .set({
-        'role': 'staff',
+          .doc(uid);
+      final mSnap = await userRef.get();
+
+      // ⚠️ regra: NÃO rebaixar papel existente
+      String? existingRole = mSnap.data()?['role']?.toString();
+      String roleToWrite;
+      if (existingRole == 'admin' || existingRole == 'staff') {
+        roleToWrite = existingRole!; // preserva
+      } else {
+        // Se for o criador da loja, entra como admin; senão staff
+        final createdBy = tenantSnap.data()?['createdBy']?.toString();
+        roleToWrite = (createdBy == uid) ? 'admin' : 'staff';
+      }
+
+      // Cria/atualiza membership.
+      // Importante: só envia 'role' quando estamos DEFININDO (novo) ou garantindo admin do dono.
+      final data = <String, dynamic>{
         'active': true,
         'displayName': me.displayName ?? '',
         'email': me.email ?? '',
         'joinedAt': FieldValue.serverTimestamp(),
-      }, SetOptions(merge: true));
+        'joinCode': code, // exigido pelas RULES para auto-join
+      };
+      if (!mSnap.exists || roleToWrite == 'admin') {
+        data['role'] = roleToWrite;
+      }
+      await userRef.set(data, SetOptions(merge: true));
 
       await ref.read(tenantIdProvider.notifier).set(tenantId);
 
-      if (!mounted) return;
       setState(() {
         _ok = 'Você entrou na loja.';
         _working = false;
       });
-      // Se esta página for modal, você pode fechar aqui:
-      // Navigator.pop(context);
     } on FirebaseException catch (e) {
-      if (mounted) setState(() => _err = '(${e.code}) ${e.message}');
+      setState(() => _err = '(${e.code}) ${e.message}');
     } catch (e) {
-      if (mounted) setState(() => _err = e.toString());
+      setState(() => _err = e.toString());
     } finally {
       if (mounted) setState(() => _working = false);
     }
   }
 
   Future<void> _createTenant() async {
-    if (mounted) {
-      setState(() {
-        _working = true;
-        _err = null;
-        _ok = null;
-      });
-    }
+    setState(() {
+      _working = true;
+      _err = null;
+      _ok = null;
+    });
 
     try {
       final name = _nameCtrl.text.trim();
       if (name.isEmpty) {
-        if (mounted) setState(() => _err = 'Informe o nome da loja.');
+        setState(() => _err = 'Informe o nome da loja.');
         return;
       }
 
       final db = FirebaseFirestore.instance;
       final uid = FirebaseAuth.instance.currentUser!.uid;
 
-      // garante um 'code' único básico
+      // code único simples
       String code = _genCode();
       for (int i = 0; i < 6; i++) {
         final exists = await db
@@ -142,7 +163,6 @@ class _TenantJoinCreatePageState extends ConsumerState<TenantJoinCreatePage> {
         code = _genCode();
       }
 
-      // cria tenant com campos esperados pelas rules
       final tRef = await db.collection('tenants').add({
         'name': name,
         'code': code,
@@ -151,12 +171,13 @@ class _TenantJoinCreatePageState extends ConsumerState<TenantJoinCreatePage> {
         'updatedAt': FieldValue.serverTimestamp(),
       });
 
-      // criador vira admin
+      // criador vira admin (seed)
+      final me = FirebaseAuth.instance.currentUser!;
       await tRef.collection('usuarios').doc(uid).set({
         'role': 'admin',
         'active': true,
-        'displayName': FirebaseAuth.instance.currentUser?.displayName ?? '',
-        'email': FirebaseAuth.instance.currentUser?.email ?? '',
+        'displayName': me.displayName ?? '',
+        'email': me.email ?? '',
         'joinedAt': FieldValue.serverTimestamp(),
       }, SetOptions(merge: true));
 
@@ -172,17 +193,14 @@ class _TenantJoinCreatePageState extends ConsumerState<TenantJoinCreatePage> {
 
       await ref.read(tenantIdProvider.notifier).set(tRef.id);
 
-      if (!mounted) return;
       setState(() {
         _ok = 'Loja criada. Código de convite: $code';
         _working = false;
       });
-      // Se for modal, pode fechar:
-      // Navigator.pop(context);
     } on FirebaseException catch (e) {
-      if (mounted) setState(() => _err = '(${e.code}) ${e.message}');
+      setState(() => _err = '(${e.code}) ${e.message}');
     } catch (e) {
-      if (mounted) setState(() => _err = e.toString());
+      setState(() => _err = e.toString());
     } finally {
       if (mounted) setState(() => _working = false);
     }

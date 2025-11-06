@@ -41,29 +41,20 @@ class CartItem {
       );
 }
 
-/// Carrinho com persistência por tenant.
-/// Salva/restaura automaticamente ao trocar de loja.
 class CartNotifier extends StateNotifier<List<CartItem>> {
   final Ref ref;
   SharedPreferences? _prefs;
   String? _tenantId;
 
   CartNotifier(this.ref) : super(const []) {
-    // observa mudanças de loja
     ref.listen<String?>(tenantIdProvider, (prev, next) async {
       await _ensurePrefs();
-
-      // salva carrinho da loja anterior
       if (prev != next && prev != null) {
         await _saveFor(prev);
       }
-
-      // carrega carrinho da nova loja
       _tenantId = next;
       await _loadFor(_tenantId);
     });
-
-    // carga inicial
     _init();
   }
 
@@ -103,7 +94,6 @@ class CartNotifier extends StateNotifier<List<CartItem>> {
     await _prefs!.setString(_keyFor(tenantId), raw);
   }
 
-  /// Adiciona novo item ou incrementa a quantidade do existente
   void addOrInc(CartItem item, {int by = 1}) {
     if (by == 0) return;
     final idx = state.indexWhere((e) => e.productId == item.productId);
@@ -122,7 +112,6 @@ class CartNotifier extends StateNotifier<List<CartItem>> {
     _save();
   }
 
-  /// Incrementa 1 (ou N) um item existente
   void inc(String productId, {int by = 1}) {
     final idx = state.indexWhere((e) => e.productId == productId);
     if (idx < 0) return;
@@ -131,7 +120,6 @@ class CartNotifier extends StateNotifier<List<CartItem>> {
     _save();
   }
 
-  /// Decrementa 1 (ou N). Se chegar a 0, remove.
   void dec(String productId, {int by = 1}) {
     final idx = state.indexWhere((e) => e.productId == productId);
     if (idx < 0) return;
@@ -139,7 +127,6 @@ class CartNotifier extends StateNotifier<List<CartItem>> {
     setQuantity(productId, q);
   }
 
-  /// Define a quantidade exata (<=0 remove)
   void setQuantity(String productId, int qty) {
     final idx = state.indexWhere((e) => e.productId == productId);
     if (idx < 0) return;
@@ -151,7 +138,6 @@ class CartNotifier extends StateNotifier<List<CartItem>> {
     _save();
   }
 
-  /// Atualiza preço unitário (se necessário)
   void setUnitPrice(String productId, double unitPrice) {
     final idx = state.indexWhere((e) => e.productId == productId);
     if (idx < 0) return;
@@ -174,25 +160,21 @@ final cartProvider = StateNotifierProvider<CartNotifier, List<CartItem>>((ref) {
   return CartNotifier(ref);
 });
 
-/// Quantidade de **itens distintos** (para badge)
 final cartCountProvider = Provider<int>((ref) {
   final items = ref.watch(cartProvider);
   return items.length;
 });
 
-/// Quantidade **total de unidades** (somando quantidades)
 final cartTotalQtyProvider = Provider<int>((ref) {
   final items = ref.watch(cartProvider);
   return items.fold(0, (sum, e) => sum + e.quantity);
 });
 
-/// Subtotal (R$)
 final cartSubtotalProvider = Provider<double>((ref) {
   final items = ref.watch(cartProvider);
   return items.fold(0.0, (sum, e) => sum + e.total);
 });
 
-/// Quantidade já no carrinho para um produto específico
 final cartQtyForProvider = Provider.family<int, String>((ref, productId) {
   final items = ref.watch(cartProvider);
   return items
@@ -204,7 +186,6 @@ final cartQtyForProvider = Provider.family<int, String>((ref, productId) {
       .quantity;
 });
 
-/// Subtotal por produto (útil em telas de revisão)
 final cartSubtotalForProvider =
     Provider.family<double, String>((ref, productId) {
   final items = ref.watch(cartProvider);
