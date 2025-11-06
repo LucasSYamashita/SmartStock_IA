@@ -19,7 +19,7 @@ class _TenantJoinCreatePageState extends ConsumerState<TenantJoinCreatePage> {
   final _nameCtrl = TextEditingController();
 
   bool _working = false;
-  String? _err, _ok;
+  String? _err;
 
   @override
   void dispose() {
@@ -35,16 +35,17 @@ class _TenantJoinCreatePageState extends ConsumerState<TenantJoinCreatePage> {
   }
 
   Future<void> _joinByCode() async {
-    setState(() {
-      _working = true;
-      _err = null;
-      _ok = null;
-    });
+    if (mounted) {
+      setState(() {
+        _working = true;
+        _err = null;
+      });
+    }
 
     try {
       final code = _joinCode.text.trim().toUpperCase();
       if (code.isEmpty) {
-        setState(() => _err = 'Informe um código.');
+        if (mounted) setState(() => _err = 'Informe um código.');
         return;
       }
 
@@ -52,7 +53,7 @@ class _TenantJoinCreatePageState extends ConsumerState<TenantJoinCreatePage> {
       String? tenantId;
       DocumentSnapshot<Map<String, dynamic>>? tenantSnap;
 
-      // 1) tenta /tenants
+      // 1) /tenants pelo campo 'code'
       final byTenants = await db
           .collection('tenants')
           .where('code', isEqualTo: code)
@@ -80,7 +81,7 @@ class _TenantJoinCreatePageState extends ConsumerState<TenantJoinCreatePage> {
           tenantId.isEmpty ||
           tenantSnap == null ||
           !tenantSnap.exists) {
-        setState(() => _err = 'Código inválido.');
+        if (mounted) setState(() => _err = 'Código inválido.');
         return;
       }
 
@@ -94,57 +95,52 @@ class _TenantJoinCreatePageState extends ConsumerState<TenantJoinCreatePage> {
           .doc(uid);
       final mSnap = await userRef.get();
 
-      // ⚠️ regra: NÃO rebaixar papel existente
+      // Preserva papel se já é admin/staff; senão define
       String? existingRole = mSnap.data()?['role']?.toString();
       String roleToWrite;
       if (existingRole == 'admin' || existingRole == 'staff') {
-        roleToWrite = existingRole!; // preserva
+        roleToWrite = existingRole!;
       } else {
-        // Se for o criador da loja, entra como admin; senão staff
         final createdBy = tenantSnap.data()?['createdBy']?.toString();
         roleToWrite = (createdBy == uid) ? 'admin' : 'staff';
       }
 
-      // Cria/atualiza membership.
-      // Importante: só envia 'role' quando estamos DEFININDO (novo) ou garantindo admin do dono.
       final data = <String, dynamic>{
         'active': true,
         'displayName': me.displayName ?? '',
         'email': me.email ?? '',
         'joinedAt': FieldValue.serverTimestamp(),
-        'joinCode': code, // exigido pelas RULES para auto-join
       };
       if (!mSnap.exists || roleToWrite == 'admin') {
         data['role'] = roleToWrite;
       }
+
       await userRef.set(data, SetOptions(merge: true));
 
+      // Define o tenant e deixa o Gate navegar; não chamar setState depois disso.
       await ref.read(tenantIdProvider.notifier).set(tenantId);
-
-      setState(() {
-        _ok = 'Você entrou na loja.';
-        _working = false;
-      });
+      return;
     } on FirebaseException catch (e) {
-      setState(() => _err = '(${e.code}) ${e.message}');
+      if (mounted) setState(() => _err = '(${e.code}) ${e.message}');
     } catch (e) {
-      setState(() => _err = e.toString());
+      if (mounted) setState(() => _err = e.toString());
     } finally {
       if (mounted) setState(() => _working = false);
     }
   }
 
   Future<void> _createTenant() async {
-    setState(() {
-      _working = true;
-      _err = null;
-      _ok = null;
-    });
+    if (mounted) {
+      setState(() {
+        _working = true;
+        _err = null;
+      });
+    }
 
     try {
       final name = _nameCtrl.text.trim();
       if (name.isEmpty) {
-        setState(() => _err = 'Informe o nome da loja.');
+        if (mounted) setState(() => _err = 'Informe o nome da loja.');
         return;
       }
 
@@ -171,7 +167,7 @@ class _TenantJoinCreatePageState extends ConsumerState<TenantJoinCreatePage> {
         'updatedAt': FieldValue.serverTimestamp(),
       });
 
-      // criador vira admin (seed)
+      // criador vira admin
       final me = FirebaseAuth.instance.currentUser!;
       await tRef.collection('usuarios').doc(uid).set({
         'role': 'admin',
@@ -191,16 +187,13 @@ class _TenantJoinCreatePageState extends ConsumerState<TenantJoinCreatePage> {
         });
       } catch (_) {}
 
+      // Define o tenant e deixa o Gate navegar; não chamar setState depois disso.
       await ref.read(tenantIdProvider.notifier).set(tRef.id);
-
-      setState(() {
-        _ok = 'Loja criada. Código de convite: $code';
-        _working = false;
-      });
+      return;
     } on FirebaseException catch (e) {
-      setState(() => _err = '(${e.code}) ${e.message}');
+      if (mounted) setState(() => _err = '(${e.code}) ${e.message}');
     } catch (e) {
-      setState(() => _err = e.toString());
+      if (mounted) setState(() => _err = e.toString());
     } finally {
       if (mounted) setState(() => _working = false);
     }
@@ -282,11 +275,6 @@ class _TenantJoinCreatePageState extends ConsumerState<TenantJoinCreatePage> {
             Padding(
               padding: const EdgeInsets.only(top: 12),
               child: Text(_err!, style: const TextStyle(color: Colors.red)),
-            ),
-          if (_ok != null)
-            Padding(
-              padding: const EdgeInsets.only(top: 12),
-              child: Text(_ok!, style: const TextStyle(color: Colors.green)),
             ),
         ],
       ),

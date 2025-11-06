@@ -19,12 +19,15 @@ class ManualSaleCatalogPage extends ConsumerStatefulWidget {
 }
 
 class _ManualSaleCatalogPageState extends ConsumerState<ManualSaleCatalogPage> {
-  final Map<String, int> _cart = {}; // produtoId -> qty
-  final Map<String, double> _prices = {}; // produtoId -> preço unitário
+  final Map<String, int> _cart = {}; // productId -> qty
+  final Map<String, double> _prices = {}; // productId -> unit price
 
   String _paymentMethod = 'pix'; // pix|dinheiro|debito|credito|outros
   final _paymentNote = TextEditingController();
-  final _customerName = TextEditingController(); // só no recibo (não salva)
+  final _customerName = TextEditingController(); // só no recibo
+
+  bool _saving = false;
+  String? _err;
 
   @override
   void dispose() {
@@ -42,6 +45,7 @@ class _ManualSaleCatalogPageState extends ConsumerState<ManualSaleCatalogPage> {
       );
     }
 
+    // Lista todos os produtos (ordenados) — se quiser, pode filtrar por ativo=true.
     final query = FirebaseFirestore.instance
         .collection('tenants')
         .doc(tenantId)
@@ -72,6 +76,10 @@ class _ManualSaleCatalogPageState extends ConsumerState<ManualSaleCatalogPage> {
             return const Center(child: CircularProgressIndicator());
           }
           final docs = snap.data!.docs;
+
+          if (docs.isEmpty) {
+            return const Center(child: Text('Nenhum produto.'));
+          }
 
           return ListView.separated(
             itemCount: docs.length,
@@ -139,13 +147,24 @@ class _ManualSaleCatalogPageState extends ConsumerState<ManualSaleCatalogPage> {
                       '${_customerName.text.trim().isEmpty ? '' : ' • Cliente: ${_customerName.text.trim()}'}',
                       style: Theme.of(context).textTheme.labelMedium,
                     ),
+                    if (_err != null)
+                      Padding(
+                        padding: const EdgeInsets.only(top: 4),
+                        child: Text(_err!,
+                            style: const TextStyle(color: Colors.red)),
+                      ),
                   ],
                 ),
               ),
               FilledButton.icon(
-                icon: const Icon(Icons.check),
-                label: const Text('Finalizar'),
-                onPressed: total <= 0 ? null : _finalizarVenda,
+                icon: _saving
+                    ? const SizedBox(
+                        height: 18,
+                        width: 18,
+                        child: CircularProgressIndicator(strokeWidth: 2))
+                    : const Icon(Icons.check),
+                label: Text(_saving ? 'Gravando...' : 'Finalizar'),
+                onPressed: (_saving || total <= 0) ? null : _finalizarVenda,
               ),
             ],
           ),
@@ -253,7 +272,7 @@ class _ManualSaleCatalogPageState extends ConsumerState<ManualSaleCatalogPage> {
       final tenantId = ref.read(tenantIdProvider);
       if (tenantId == null) throw StateError('Loja não selecionada.');
 
-      // itens
+      // monta itens a partir do carrinho
       final itens = <_SaleLine>[];
       _cart.forEach((id, qty) {
         if (qty > 0) {
@@ -263,6 +282,11 @@ class _ManualSaleCatalogPageState extends ConsumerState<ManualSaleCatalogPage> {
       });
       if (itens.isEmpty) throw StateError('Carrinho vazio.');
 
+      setState(() {
+        _saving = true;
+        _err = null;
+      });
+
       final db = FirebaseFirestore.instance;
       final uid = FirebaseAuth.instance.currentUser!.uid;
 
@@ -271,15 +295,15 @@ class _ManualSaleCatalogPageState extends ConsumerState<ManualSaleCatalogPage> {
       final desconto = 0.0;
       final total = (subtotal - desconto).clamp(0.0, double.infinity);
 
-      // 1) cria venda (sem clienteNome; paymentNote só se existir)
+      // 1) cria documento de venda
       final vendaData = {
         'itens': [
           for (final it in itens)
             {
               'productId': it.produtoId,
               'qtd': it.qty,
-              'preco': it.unitPrice,
-              'total': it.unitPrice * it.qty,
+              'preco': it.unitPrice, // unitPrice no momento
+              'total': it.unitPrice * it.qty, // total por linha
             }
         ],
         'subtotal': subtotal,
@@ -300,7 +324,7 @@ class _ManualSaleCatalogPageState extends ConsumerState<ManualSaleCatalogPage> {
           .collection('vendas')
           .add(vendaData);
 
-      // 2) aplica movimentações
+      // 2) aplica movimentos (estoque - e log com unitPrice/totalValue)
       final mov = FirestoreMovements(db, tenantId);
       for (final it in itens) {
         await mov.applyMovement(
@@ -315,18 +339,18 @@ class _ManualSaleCatalogPageState extends ConsumerState<ManualSaleCatalogPage> {
           paymentNote: _paymentNote.text.trim().isEmpty
               ? null
               : _paymentNote.text.trim(),
-          preco: it.unitPrice,
+          preco: it.unitPrice, // mapeado internamente para unitPrice/totalValue
         );
       }
 
       // 3) limpa carrinho
+      if (!mounted) return;
       setState(() {
         _cart.clear();
         _prices.clear();
       });
 
-      // 4) sucesso
-      if (!mounted) return;
+      // 4) feedback de sucesso + recibo
       await Navigator.of(context).pushReplacement(
         MaterialPageRoute(
           builder: (_) => SaleSuccessPage(
@@ -347,10 +371,13 @@ class _ManualSaleCatalogPageState extends ConsumerState<ManualSaleCatalogPage> {
       );
     } catch (e) {
       final msg = e is FirebaseException ? '${e.code}: ${e.message}' : '$e';
-      if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Falha ao finalizar venda: $msg')),
-      );
+      if (mounted) {
+        setState(() => _err = msg);
+        ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(content: Text('Falha ao finalizar venda: $msg')));
+      }
+    } finally {
+      if (mounted) setState(() => _saving = false);
     }
   }
 
@@ -363,14 +390,14 @@ class _ManualSaleCatalogPageState extends ConsumerState<ManualSaleCatalogPage> {
     required String paymentMethod,
     String? customerName,
   }) async {
-    // loja
+    // pega nome da loja (best-effort)
     String loja = tenantId;
     try {
       final t = await FirebaseFirestore.instance
           .collection('tenants')
           .doc(tenantId)
           .get();
-      loja = (t.data()?['name'] ?? loja).toString();
+      loja = (t.data()?['name'] ?? t.data()?['nome'] ?? loja).toString();
     } catch (_) {}
 
     final subtotal =
@@ -424,8 +451,11 @@ class _SaleLine {
   final String produtoId;
   final int qty;
   final double unitPrice;
-  _SaleLine(
-      {required this.produtoId, required this.qty, required this.unitPrice});
+  _SaleLine({
+    required this.produtoId,
+    required this.qty,
+    required this.unitPrice,
+  });
 }
 
 String _fmt(num v) => 'R\$ ${v.toStringAsFixed(2).replaceAll('.', ',')}';

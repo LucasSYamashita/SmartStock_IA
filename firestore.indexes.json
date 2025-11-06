@@ -1,4 +1,21 @@
 {
-  "indexes": [],
-  "fieldOverrides": []
+    "indexes": [{
+            "collectionGroup": "movimentos",
+            "queryScope": "COLLECTION",
+            "fields": [
+                { "fieldPath": "tipo", "order": "ASCENDING" },
+                { "fieldPath": "createdAt", "order": "DESCENDING" }
+            ]
+        },
+        {
+            "collectionGroup": "movimentos",
+            "queryScope": "COLLECTION",
+            "fields": [
+                { "fieldPath": "tipo", "order": "ASCENDING" },
+                { "fieldPath": "paymentMethod", "order": "ASCENDING" },
+                { "fieldPath": "createdAt", "order": "DESCENDING" }
+            ]
+        }
+    ],
+    "fieldOverrides": []
 }

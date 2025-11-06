@@ -1,9 +1,10 @@
 // lib/features/chat/chat_controller.dart
 import 'dart:math';
 import 'package:cloud_firestore/cloud_firestore.dart';
-import 'package:cloud_functions/cloud_functions.dart';
+
 import 'chat_message.dart';
-import 'nlu.dart';
+import 'nlu.dart'; // MoveIntent / parseCommand
+import 'chat_backend.dart'; // makeChatBackend()
 
 class ChatController {
   final String tenantId;
@@ -12,13 +13,13 @@ class ChatController {
 
   final List<ChatMessage> messages = [];
 
-  // Random.secure() tem pegadinhas no web; use Random() simples aqui
+  // Random.secure() pode travar no web; use Random() simples
   final _rnd = Random();
-  String? _pendingId; // requestId em aberto (idempotência)
+  String? _pendingId; // id de idempotência
   bool _busy = false;
 
-  // guarda a última MoveIntent proposta (para o botão Confirmar)
-  MoveIntent? _pendingMove;
+  MoveIntent? _pendingMove; // última proposta pendente
+  final ChatBackend _backend = makeChatBackend(FirebaseFirestore.instance);
 
   ChatController({
     required this.tenantId,
@@ -28,10 +29,9 @@ class ChatController {
 
   bool get hasPendingMove => _pendingMove != null;
 
-  /// ID curta p/ idempotência (tempo + aleatório)
   String _newId() {
     final t = DateTime.now().microsecondsSinceEpoch.toRadixString(36);
-    final r = _rnd.nextInt(1000000000).toRadixString(36); // evita 0 no web
+    final r = _rnd.nextInt(1 << 30).toRadixString(36);
     return '$t$r';
   }
 
@@ -40,17 +40,12 @@ class ChatController {
     double? preco,
   }) async {
     final db = FirebaseFirestore.instance;
-    final products =
-        db.collection('tenants').doc(tenantId).collection('produtos');
-
+    final col = db.collection('tenants').doc(tenantId).collection('produtos');
     final nomeLower = name.toLowerCase().trim();
 
-    // tenta achar por nomeLower
-    final q =
-        await products.where('nomeLower', isEqualTo: nomeLower).limit(1).get();
+    final q = await col.where('nomeLower', isEqualTo: nomeLower).limit(1).get();
     if (q.docs.isNotEmpty) {
       final doc = q.docs.first;
-      // se veio um preço novo, atualiza o preço do produto
       if (preco != null && preco >= 0) {
         await doc.reference.update({
           'preco': preco,
@@ -61,8 +56,7 @@ class ChatController {
       return doc.id;
     }
 
-    // cria com campos compatíveis às regras
-    final doc = await products.add({
+    final doc = await col.add({
       'nome': name,
       'nomeLower': nomeLower,
       'categoria': '',
@@ -84,46 +78,55 @@ class ChatController {
     final text = raw.trim();
     if (text.isEmpty) return;
 
+    // atalhos: confirmar/cancelar por texto
+    final t = text.toLowerCase();
+    if (t == 'confirmar' && _pendingMove != null) {
+      await confirmPending(onChange: onChange);
+      return;
+    }
+    if (t == 'cancelar' && _pendingMove != null) {
+      cancelPending(onChange: onChange);
+      messages.add(
+        ChatMessage(role: 'assistant', text: 'Operação cancelada.'),
+      );
+      onChange?.call();
+      return;
+    }
+
     messages.add(ChatMessage(role: 'user', text: text));
     onChange?.call();
 
     _pendingId ??= _newId();
 
-    // NLU local
+    // 1) NLU local -> se reconheceu movimento, apenas propõe
     final intent = parseCommand(text);
     if (intent is MoveIntent) {
       _pendingMove = intent;
       final resumo = intent.tipo == 'entrada' ? 'entrada' : 'saída';
-      final conf =
-          'Proposta: $resumo de ${intent.quantidade} un. em "${intent.produtoNome}"'
-          '${intent.preco != null ? ' a ${intent.preco!.toStringAsFixed(2)}' : ''}. Confirmar?';
+      final conf = 'Proposta: $resumo de ${intent.quantidade} un. em '
+          '"${intent.produtoNome}"'
+          '${intent.preco != null ? ' a ${intent.preco!.toStringAsFixed(2)}' : ''}. '
+          'Confirmar?';
       messages.add(ChatMessage(role: 'assistant', text: conf));
       onChange?.call();
       return;
     }
 
-    // fallback opcional no backend (callable)
+    // 2) Qualquer outra coisa -> backend (Functions com fallback local)
     try {
-      final funcs = FirebaseFunctions.instanceFor(region: 'southamerica-east1');
-      final callable = funcs.httpsCallable('actCallV2');
-      final resp = await callable.call({
-        'requestId': _pendingId,
-        'tenantId': tenantId,
-        'role': role,
-        'text': text,
-      });
-
-      final data = Map<String, dynamic>.from(resp.data as Map);
-      final msg = (data['message'] as String?) ?? 'Ok.';
-      messages.add(ChatMessage(role: 'assistant', text: msg));
-      onChange?.call();
-    } catch (_) {
-      messages.add(
-        ChatMessage(
-            role: 'assistant', text: 'Falha ao processar. Tente novamente.'),
+      final res = await _backend.respond(
+        tenantId: tenantId,
+        userId: userId,
+        text: text,
       );
-      onChange?.call();
+      messages.add(ChatMessage(role: 'assistant', text: res.reply));
+    } catch (_) {
+      messages.add(ChatMessage(
+        role: 'assistant',
+        text: 'Não consegui responder agora. Tente novamente.',
+      ));
     }
+    onChange?.call();
   }
 
   /// Confirma a última movimentação proposta (idempotente)
@@ -139,21 +142,18 @@ class ChatController {
         db.collection('tenants').doc(tenantId).collection('movimentos').doc(id);
 
     try {
-      // garante produto e faz tudo na transação
       await db.runTransaction((tx) async {
-        // cria/pega produto
         final produtoId = await _getOrCreateProdutoByName(
           name: move.produtoNome,
-          preco: move.preco, // pode ser null
+          preco: move.preco,
         );
 
         // idempotência
-        final snap = await tx.get(movRef);
-        if (snap.exists) {
+        final exists = await tx.get(movRef);
+        if (exists.exists) {
           throw StateError('already-exists');
         }
 
-        // monta mapa do movimento SEM preco quando não existe
         final movData = <String, dynamic>{
           'tipo': move.tipo, // 'entrada' | 'saida'
           'produtoId': produtoId,
@@ -165,13 +165,10 @@ class ChatController {
           'requestId': id,
           'createdAt': FieldValue.serverTimestamp(),
         };
-        if (move.preco != null) {
-          movData['preco'] = move.preco; // só inclui se número
-        }
+        if (move.preco != null) movData['preco'] = move.preco;
 
         tx.set(movRef, movData);
 
-        // atualiza estoque do produto
         final prodRef = db
             .collection('tenants')
             .doc(tenantId)
@@ -180,31 +177,25 @@ class ChatController {
 
         tx.update(prodRef, {
           'quantidade': FieldValue.increment(
-              move.tipo == 'entrada' ? move.quantidade : -move.quantidade),
+            move.tipo == 'entrada' ? move.quantidade : -move.quantidade,
+          ),
           'updatedAt': FieldValue.serverTimestamp(),
           'updatedBy': userId,
         });
       });
 
-      messages.add(
-        ChatMessage(
-          role: 'assistant',
-          text:
-              '✅ ${move.tipo == 'entrada' ? 'Entrada' : 'Saída'} registrada com sucesso.',
-        ),
-      );
+      messages.add(ChatMessage(
+        role: 'assistant',
+        text:
+            '✅ ${move.tipo == 'entrada' ? 'Entrada' : 'Saída'} registrada com sucesso.',
+      ));
     } on StateError catch (e) {
-      if (e.message == 'already-exists') {
-        messages.add(ChatMessage(
-          role: 'assistant',
-          text: 'ℹ️ Esta movimentação já havia sido registrada (idempotente).',
-        ));
-      } else {
-        messages.add(ChatMessage(
-          role: 'assistant',
-          text: 'Erro ao confirmar. Tente novamente.',
-        ));
-      }
+      messages.add(ChatMessage(
+        role: 'assistant',
+        text: e.message == 'already-exists'
+            ? 'ℹ️ Esta movimentação já havia sido registrada (idempotente).'
+            : 'Erro ao confirmar. Tente novamente.',
+      ));
     } catch (_) {
       messages.add(ChatMessage(
         role: 'assistant',

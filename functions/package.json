@@ -1,20 +1,24 @@
 {
-    "name": "functions",
+    "name": "smartstock-functions",
     "private": true,
     "engines": { "node": "20" },
-    "main": "lib/index.js",
     "type": "commonjs",
+    "main": "lib/index.js",
     "scripts": {
         "build": "tsc",
-        "lint": "eslint ."
+        "deploy": "npm run build && firebase deploy --only functions",
+        "deploy:act": "npm run build && firebase deploy --only functions:actCallV2",
+        "deploy:chat": "npm run build && firebase deploy --only functions:chatRespond"
     },
     "dependencies": {
         "firebase-admin": "^12.6.0",
         "firebase-functions": "^5.1.1"
     },
+    "optionalDependencies": {
+        "@google-cloud/vertexai": "^1.10.0"
+    },
     "devDependencies": {
         "typescript": "^5.6.3",
-        "@types/node": "^20.16.11",
-        "eslint": "^9.12.0"
+        "@types/node": "^20.16.11"
     }
 }

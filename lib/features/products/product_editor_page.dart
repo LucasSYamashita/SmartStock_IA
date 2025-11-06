@@ -1,11 +1,12 @@
 import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
-import '../../data/datasources/firestore_products.dart';
 import '../tenant/tenant_provider.dart';
-import '../auth/auth_providers.dart'; // para saber se é admin
+import '../tenant/membership_guard.dart'; // para checar role
+import 'product_service.dart';
 
 class ProductEditorPage extends ConsumerStatefulWidget {
   final String? productId; // null = criar
@@ -28,6 +29,12 @@ class _ProductEditorPageState extends ConsumerState<ProductEditorPage> {
   String? _err;
 
   @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addPostFrameCallback((_) => _loadIfNeeded());
+  }
+
+  @override
   void dispose() {
     _nome.dispose();
     _categoria.dispose();
@@ -36,13 +43,6 @@ class _ProductEditorPageState extends ConsumerState<ProductEditorPage> {
     _qtd.dispose();
     _min.dispose();
     super.dispose();
-  }
-
-  @override
-  void initState() {
-    super.initState();
-    // Se for edição, carrega dados
-    WidgetsBinding.instance.addPostFrameCallback((_) => _loadIfNeeded());
   }
 
   Future<void> _loadIfNeeded() async {
@@ -56,39 +56,40 @@ class _ProductEditorPageState extends ConsumerState<ProductEditorPage> {
     });
 
     try {
-      final db = FirebaseFirestore.instance;
-      final api = FirestoreProducts(db, tenantId);
-      final p = await api.getById(widget.productId!);
-      if (p == null) {
+      final snap = await FirebaseFirestore.instance
+          .collection('tenants')
+          .doc(tenantId)
+          .collection('produtos')
+          .doc(widget.productId)
+          .get();
+
+      if (!snap.exists) {
         setState(() => _err = 'Produto não encontrado.');
         return;
       }
 
-      _nome.text = p.nome;
-      _categoria.text = p.categoria;
-      _sku.text = p.sku ?? '';
-      _preco.text = (p.preco).toStringAsFixed(2);
-      _qtd.text = p.quantidade.toString();
-      _min.text = p.estoqueMinimo.toString();
-      _ativo = p.ativo;
+      final p = snap.data()!;
+      _nome.text = (p['nome'] ?? '').toString();
+      _categoria.text = (p['categoria'] ?? '').toString();
+      _sku.text = (p['sku'] ?? '').toString();
+      _preco.text = ((p['preco'] ?? 0) as num).toStringAsFixed(2);
+      _qtd.text = ((p['quantidade'] ?? 0) as num).toString();
+      _min.text = ((p['estoqueMinimo'] ?? 0) as num).toString();
+      _ativo = (p['ativo'] is bool) ? p['ativo'] as bool : true;
       setState(() {});
     } on FirebaseException catch (e) {
       setState(() => _err = '${e.code}: ${e.message}');
     } catch (e) {
       setState(() => _err = e.toString());
     } finally {
-      setState(() => _loading = false);
+      if (mounted) setState(() => _loading = false);
     }
   }
 
-  double _parsePreco() {
-    final raw = _preco.text.trim().replaceAll(',', '.');
-    return double.tryParse(raw) ?? 0.0;
-  }
+  double _parsePreco() =>
+      double.tryParse(_preco.text.trim().replaceAll(',', '.')) ?? 0.0;
 
-  int _parseInt(TextEditingController c) {
-    return int.tryParse(c.text.trim()) ?? 0;
-  }
+  int _parseInt(TextEditingController c) => int.tryParse(c.text.trim()) ?? 0;
 
   Future<void> _save() async {
     final tenantId = ref.read(tenantIdProvider);
@@ -97,7 +98,12 @@ class _ProductEditorPageState extends ConsumerState<ProductEditorPage> {
       return;
     }
 
-    final isAdmin = ref.read(isAdminProvider);
+    // checa role
+    final member = ref.read(membershipProvider(tenantId)).maybeWhen(
+          data: (m) => m,
+          orElse: () => null,
+        );
+    final isAdmin = (member?['role'] ?? '') == 'admin';
     if (!isAdmin) {
       setState(
           () => _err = 'Permissão insuficiente (apenas admin pode salvar).');
@@ -120,47 +126,62 @@ class _ProductEditorPageState extends ConsumerState<ProductEditorPage> {
     });
 
     try {
-      final db = FirebaseFirestore.instance;
-      final api = FirestoreProducts(db, tenantId);
-
-      // Monta payload (compatível com suas telas antigas)
-      final data = <String, dynamic>{
-        'nome': nome,
-        'nomeLower': nome.toLowerCase(),
-        'categoria': _categoria.text.trim(),
-        'sku': _sku.text.trim().isEmpty ? null : _sku.text.trim(),
-        'preco': preco,
-        'valor': preco, // compat
-        'quantidade': quantidade,
-        'estoqueMinimo': minimo,
-        'ativo': _ativo,
-      };
-
       if (widget.productId == null) {
-        // cria com set + timestamps
-        final newId = db.collection('_ids').doc().id; // jeito simples p/ ID
-        await api.createWithServerTimestamps(
-          id: newId,
-          nome: data['nome'],
-          categoria: data['categoria'] ?? '',
-          sku: data['sku'],
+        // CRIAR
+        final uid = FirebaseAuth.instance.currentUser!.uid;
+        final doc = await FirebaseFirestore.instance
+            .collection('tenants')
+            .doc(tenantId)
+            .collection('produtos')
+            .add({
+          'nome': nome,
+          'nomeLower': nome.toLowerCase(),
+          'categoria': _categoria.text.trim(),
+          'sku': _sku.text.trim().isEmpty ? '' : _sku.text.trim(),
+          'preco': preco,
+          'quantidade': quantidade,
+          'estoqueMinimo': minimo,
+          'ativo': _ativo,
+          'createdAt': FieldValue.serverTimestamp(),
+          'createdBy': uid,
+          'updatedAt': FieldValue.serverTimestamp(),
+          'updatedBy': uid,
+        });
+
+        // se criou com quantidade > 0, registra movimento de entrada
+        if (quantidade > 0) {
+          await ProductService.registrarEntradaNoProduto(
+            tenantId: tenantId,
+            produtoId: doc.id,
+            quantidade: quantidade,
+            motivo: 'cadastro_inicial',
+          );
+        }
+      } else {
+        // EDITAR (usa serviço que também loga ajuste se a quantidade mudou)
+        await ProductService.salvarEdicaoProduto(
+          tenantId: tenantId,
+          produtoId: widget.productId!,
+          nome: nome,
+          categoria: _categoria.text.trim(),
+          sku: _sku.text.trim(),
           preco: preco,
           quantidade: quantidade,
           estoqueMinimo: minimo,
           ativo: _ativo,
         );
-      } else {
-        // update + updatedAt
-        await api.updateWithServerTimestamp(id: widget.productId!, data: data);
       }
 
       if (!mounted) return;
       Navigator.of(context).pop(true);
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
-            content: Text(widget.productId == null
+          content: Text(
+            widget.productId == null
                 ? 'Produto criado.'
-                : 'Produto atualizado.')),
+                : 'Produto atualizado.',
+          ),
+        ),
       );
     } on FirebaseException catch (e) {
       setState(() => _err = '${e.code}: ${e.message}');
@@ -217,7 +238,7 @@ class _ProductEditorPageState extends ConsumerState<ProductEditorPage> {
                     FilteringTextInputFormatter.allow(RegExp(r'[0-9,\.]'))
                   ],
                   decoration: const InputDecoration(
-                    labelText: 'Preço (RS)',
+                    labelText: 'Preço (R\$)',
                     prefixIcon: Icon(Icons.attach_money),
                   ),
                 ),
@@ -272,9 +293,11 @@ class _ProductEditorPageState extends ConsumerState<ProductEditorPage> {
                   width: double.infinity,
                   child: FilledButton(
                     onPressed: _loading ? null : _save,
-                    child: Text(_loading
-                        ? 'Salvando...'
-                        : (isEdit ? 'Salvar alterações' : 'Criar produto')),
+                    child: Text(
+                      _loading
+                          ? 'Salvando...'
+                          : (isEdit ? 'Salvar alterações' : 'Criar produto'),
+                    ),
                   ),
                 ),
               ],

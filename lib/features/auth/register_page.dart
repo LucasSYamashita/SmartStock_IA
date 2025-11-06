@@ -1,11 +1,9 @@
-import 'dart:math';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/material.dart';
 
 import '../../shared/widgets/app_button.dart';
 import '../../shared/widgets/app_input.dart';
-import '../tenant/tenant_provider.dart';
 import '../tenant/tenant_join_create_page.dart';
 
 class RegisterPage extends StatefulWidget {
@@ -39,10 +37,8 @@ class _RegisterPageState extends State<RegisterPage> {
     final p2 = _pass2.text.trim();
 
     if (name.isEmpty || email.isEmpty || p1.length < 6 || p1 != p2) {
-      setState(
-        () =>
-            err = 'Preencha tudo corretamente. Senha ≥ 6 e confirmação igual.',
-      );
+      setState(() =>
+          err = 'Preencha tudo corretamente. Senha ≥ 6 e confirmação igual.');
       return;
     }
 
@@ -57,24 +53,22 @@ class _RegisterPageState extends State<RegisterPage> {
         email: email,
         password: p1,
       );
-
       await cred.user!.updateDisplayName(name);
 
-      // Perfil global (opcional)
+      // Perfil global (bate nas regras /users)
       await FirebaseFirestore.instance
-          .collection('usuarios')
+          .collection('users')
           .doc(cred.user!.uid)
           .set({
-            'email': email,
-            'displayName': name,
-            'role': 'viewer',
-            'createdAt': FieldValue.serverTimestamp(),
-          }, SetOptions(merge: true));
+        'name': name,
+        'email': email,
+        'createdAt': FieldValue.serverTimestamp(),
+        'updatedAt': FieldValue.serverTimestamp(),
+      }, SetOptions(merge: true));
 
       if (!mounted) return;
       setState(() => ok = 'Conta criada! Agora selecione/crie sua loja.');
 
-      // Leva para a tela de entrar/criar loja
       Navigator.of(context).pushReplacement(
         MaterialPageRoute(builder: (_) => const TenantJoinCreatePage()),
       );
@@ -106,10 +100,8 @@ class _RegisterPageState extends State<RegisterPage> {
                 child: ListView(
                   shrinkWrap: true,
                   children: [
-                    Text(
-                      'Cadastre-se',
-                      style: Theme.of(context).textTheme.titleLarge,
-                    ),
+                    Text('Cadastre-se',
+                        style: Theme.of(context).textTheme.titleLarge),
                     const SizedBox(height: 16),
                     AppTextField(
                       controller: _name,

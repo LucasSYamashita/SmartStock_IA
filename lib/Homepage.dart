@@ -1,3 +1,4 @@
+// lib/Homepage.dart
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/material.dart';
@@ -27,7 +28,7 @@ class _HomePageState extends ConsumerState<HomePage> {
 
   @override
   Widget build(BuildContext context) {
-    // observa o tema (apenas para rebuild quando mudar)
+    // observa o tema (para rebuild quando mudar)
     ref.watch(themeModeProvider);
 
     final tenantId = ref.watch(tenantIdProvider);
@@ -45,7 +46,7 @@ class _HomePageState extends ConsumerState<HomePage> {
     final currentUser = FirebaseAuth.instance.currentUser;
     final userId = currentUser?.uid ?? 'anonymous';
 
-    // Aba do Chat: se não houver tenant, mostra aviso simples
+    // Chat tab
     final Widget chatTab = (tenantId == null || tenantId.isEmpty)
         ? Center(
             child: Padding(
@@ -90,15 +91,22 @@ class _HomePageState extends ConsumerState<HomePage> {
       );
     }
 
-    final title = (tenantId == null || tenantId.isEmpty)
-        ? 'SmartStock'
-        : 'SmartStock · $tenantId';
+    // ===== título usando o NOME da loja =====
+    String appTitle = 'SmartStock';
+    if (tenantId != null && tenantId.isNotEmpty) {
+      final name = ref.watch(tenantNameProvider).when<String?>(
+            data: (v) => (v != null && v.isNotEmpty) ? v : null,
+            loading: () => null,
+            error: (_, __) => null,
+          );
+      if (name != null) appTitle = 'SmartStock · $name';
+    }
 
     return Scaffold(
       appBar: AppBar(
-        title: Text(title),
+        title: Text(appTitle),
         actions: [
-          const ThemeToggleAction(), // <-- alterna e persiste
+          const ThemeToggleAction(),
           IconButton(
             tooltip: 'Sair',
             icon: const Icon(Icons.logout),
@@ -149,7 +157,7 @@ class _HomePageState extends ConsumerState<HomePage> {
     return double.tryParse(s) ?? 0.0;
   }
 
-  /// Diálogo: criar produto (+ LOG de entrada inicial, se quantidade > 0).
+  /// Diálogo: criar produto (+ log de entrada inicial, se quantidade > 0).
   Future<void> _addProduct(BuildContext context) async {
     final nameCtrl = TextEditingController();
     final brandCtrl = TextEditingController(); // apenas visual
@@ -206,21 +214,20 @@ class _HomePageState extends ConsumerState<HomePage> {
                 'updatedBy': uid,
               };
 
-              // 1) cria o produto
+              // cria o produto
               final doc = await FirebaseFirestore.instance
                   .collection('tenants')
                   .doc(tenantId)
                   .collection('produtos')
                   .add(data);
 
-              // 2) Fecha modal e dá sucesso imediatamente
               if (!context.mounted) return;
               Navigator.pop(context);
               ScaffoldMessenger.of(context).showSnackBar(
                 const SnackBar(content: Text('Produto criado.')),
               );
 
-              // 3) Log de entrada (best-effort)
+              // log de entrada (best-effort)
               if (quantidade > 0) {
                 try {
                   await FirebaseFirestore.instance
@@ -237,7 +244,7 @@ class _HomePageState extends ConsumerState<HomePage> {
                     'motivo': 'cadastro inicial',
                     'createdAt': FieldValue.serverTimestamp(),
                   });
-                } catch (_) {/* ignora erro do log */}
+                } catch (_) {}
               }
             } on FirebaseException catch (e) {
               setLocal(() => err = '${e.code}: ${e.message}');

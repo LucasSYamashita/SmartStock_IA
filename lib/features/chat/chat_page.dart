@@ -1,10 +1,12 @@
+import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:flutter/material.dart';
-import 'chat_controller.dart';
-import 'chat_message.dart';
+
+// usa o backend que te passei (local por padrão)
+import 'chat_backend.dart';
 
 class ChatPage extends StatefulWidget {
   final String tenantId;
-  final String role; // 'admin' | 'staff' | 'viewer'
+  final String role; // 'admin' | 'staff' | 'viewer' (mantido p/ compat.)
   final String userId;
 
   const ChatPage({
@@ -18,19 +20,37 @@ class ChatPage extends StatefulWidget {
   State<ChatPage> createState() => _ChatPageState();
 }
 
+class _Msg {
+  final bool mine; // true = usuário; false = assistente
+  final String text;
+  _Msg(this.mine, this.text);
+}
+
 class _ChatPageState extends State<ChatPage> {
-  late final ChatController controller;
+  late final ChatBackend _backend;
   final _input = TextEditingController();
   final _scroll = ScrollController();
+  final _msgs = <_Msg>[];
+  bool _sending = false;
 
   @override
   void initState() {
     super.initState();
-    controller = ChatController(
-      tenantId: widget.tenantId,
-      role: widget.role,
-      userId: widget.userId,
-    );
+    // backend local (cai pro local mesmo que vc habilite cloud e falhe)
+    _backend = makeChatBackend(FirebaseFirestore.instance);
+
+    _msgs.add(_Msg(
+        false,
+        'Oi! Posso ajudar com **consultas**: baixo estoque, buscar itens, etc.\n'
+        'Para **entrada**, abra o produto e toque em “Registrar entrada”.\n'
+        'Para **saída/venda**, use o botão **Vender** na tela Início.'));
+  }
+
+  @override
+  void dispose() {
+    _input.dispose();
+    _scroll.dispose();
+    super.dispose();
   }
 
   void _scrollToEnd() {
@@ -38,32 +58,59 @@ class _ChatPageState extends State<ChatPage> {
     WidgetsBinding.instance.addPostFrameCallback((_) {
       _scroll.animateTo(
         _scroll.position.maxScrollExtent,
-        duration: const Duration(milliseconds: 200),
+        duration: const Duration(milliseconds: 220),
         curve: Curves.easeOut,
       );
     });
   }
 
-  void _onSend() {
-    final text = _input.text;
-    _input.clear();
-    controller.send(text, onChange: () {
-      setState(() {});
-      _scrollToEnd();
+  Future<void> _send() async {
+    final raw = _input.text.trim();
+    if (raw.isEmpty || _sending) return;
+
+    setState(() {
+      _msgs.add(_Msg(true, raw));
+      _input.clear();
+      _sending = true;
     });
+    _scrollToEnd();
+
+    // Respostas diretas para confirmar/cancelar (não há pendência aqui)
+    final t = raw.toLowerCase();
+    if (t == 'confirmar' || t == 'cancelar') {
+      setState(() {
+        _msgs.add(_Msg(
+            false,
+            'Não há movimentação pendente. Para lançar **entrada**, use o produto; '
+            'para **saída/venda**, use **Vender** na tela Início.'));
+        _sending = false;
+      });
+      _scrollToEnd();
+      return;
+    }
+
+    final res = await _backend.respond(
+      tenantId: widget.tenantId,
+      userId: widget.userId,
+      text: raw,
+    );
+
+    if (!mounted) return;
+    setState(() {
+      _msgs.add(_Msg(false, res.reply));
+      _sending = false;
+    });
+    _scrollToEnd();
   }
+
+  // Visual igual ao seu: bolhas verdes com letras brancas
+  Color _bubbleBg(bool isUser) => isUser
+      ? const Color(0xFF1B5E20).withOpacity(0.90)
+      : const Color(0xFF43A047).withOpacity(0.22);
+  Color _bubbleFg(bool isUser) => Colors.white;
 
   @override
   Widget build(BuildContext context) {
-    final items = controller.messages;
-
-    Color bubbleBg(bool isUser) => isUser
-        ? const Color(0xFF1B5E20).withOpacity(0.90)
-        : const Color(0xFF43A047).withOpacity(0.22);
-
-    // >>> Apenas as letras em branco (para user e assistant)
-    Color bubbleFg(bool isUser) => Colors.white;
-
     return Scaffold(
       appBar: AppBar(title: const Text('Chat – SmartStock')),
       body: Column(
@@ -72,10 +119,10 @@ class _ChatPageState extends State<ChatPage> {
             child: ListView.builder(
               controller: _scroll,
               padding: const EdgeInsets.symmetric(vertical: 12, horizontal: 8),
-              itemCount: items.length,
+              itemCount: _msgs.length,
               itemBuilder: (context, i) {
-                final m = items[i];
-                final isUser = m.role == 'user';
+                final m = _msgs[i];
+                final isUser = m.mine;
                 return Align(
                   alignment:
                       isUser ? Alignment.centerRight : Alignment.centerLeft,
@@ -87,7 +134,7 @@ class _ChatPageState extends State<ChatPage> {
                       padding: const EdgeInsets.symmetric(
                           horizontal: 14, vertical: 12),
                       decoration: BoxDecoration(
-                        color: bubbleBg(isUser),
+                        color: _bubbleBg(isUser),
                         borderRadius: BorderRadius.only(
                           topLeft: const Radius.circular(16),
                           topRight: const Radius.circular(16),
@@ -102,10 +149,10 @@ class _ChatPageState extends State<ChatPage> {
                           ),
                         ],
                       ),
-                      child: Text(
+                      child: SelectableText(
                         m.text,
                         style: TextStyle(
-                          color: bubbleFg(isUser), // letras brancas
+                          color: _bubbleFg(isUser),
                           height: 1.25,
                           fontSize: 15,
                           fontWeight: FontWeight.w600,
@@ -117,44 +164,8 @@ class _ChatPageState extends State<ChatPage> {
               },
             ),
           ),
-          if (controller.hasPendingMove)
-            Material(
-              elevation: 2,
-              color: const Color(0xFFE8F5E9),
-              child: Container(
-                padding:
-                    const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-                child: Row(
-                  children: [
-                    const Icon(Icons.info_outline,
-                        size: 18, color: Color(0xFF2E7D32)),
-                    const SizedBox(width: 8),
-                    const Expanded(
-                      child: Text(
-                        'Confirmar movimentação proposta?',
-                        overflow: TextOverflow.ellipsis,
-                        style: TextStyle(color: Color(0xFF1B5E20)),
-                      ),
-                    ),
-                    TextButton(
-                      onPressed: () => controller.cancelPending(onChange: () {
-                        setState(() {});
-                        _scrollToEnd();
-                      }),
-                      child: const Text('Cancelar'),
-                    ),
-                    const SizedBox(width: 8),
-                    FilledButton(
-                      onPressed: () => controller.confirmPending(onChange: () {
-                        setState(() {});
-                        _scrollToEnd();
-                      }),
-                      child: const Text('Confirmar'),
-                    ),
-                  ],
-                ),
-              ),
-            ),
+
+          // Rodapé de entrada
           SafeArea(
             top: false,
             child: Container(
@@ -170,11 +181,11 @@ class _ChatPageState extends State<ChatPage> {
                   Expanded(
                     child: TextField(
                       controller: _input,
-                      onSubmitted: (_) => _onSend(),
+                      onSubmitted: (_) => _send(),
                       textInputAction: TextInputAction.send,
                       decoration: const InputDecoration(
                         hintText:
-                            'Digite: "entrada 5 do Produto X a 10,00", "saída 2 do Produto Y"... (ou "confirmar"/"cancelar")',
+                            'Ex.: "baixo estoque", "paracetamol", "total vendido hoje"...',
                         border: OutlineInputBorder(),
                         isDense: true,
                       ),
@@ -182,8 +193,13 @@ class _ChatPageState extends State<ChatPage> {
                   ),
                   const SizedBox(width: 8),
                   FilledButton.icon(
-                    onPressed: _onSend,
-                    icon: const Icon(Icons.send, size: 18),
+                    onPressed: _sending ? null : _send,
+                    icon: _sending
+                        ? const SizedBox(
+                            height: 18,
+                            width: 18,
+                            child: CircularProgressIndicator(strokeWidth: 2))
+                        : const Icon(Icons.send, size: 18),
                     label: const Text('Enviar'),
                   ),
                 ],

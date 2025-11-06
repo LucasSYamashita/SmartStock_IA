@@ -33,8 +33,7 @@ var __importStar = (this && this.__importStar) || (function () {
     };
 })();
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.actCallV2 = void 0;
-// functions/src/index.ts
+exports.chatRespond = exports.actCallV2 = void 0;
 const admin = __importStar(require("firebase-admin"));
 const https_1 = require("firebase-functions/v2/https");
 const options_1 = require("firebase-functions/v2/options");
@@ -70,8 +69,7 @@ function parseEntrada(text) {
     return { produto, quantidade, preco };
 }
 /* ===================== Callable (Gen 2) ===================== */
-exports.actCallV2 = (0, https_1.onCall)({ timeoutSeconds: 60, memory: "512MiB" }, // opções por função
-(req) => {
+exports.actCallV2 = (0, https_1.onCall)({ timeoutSeconds: 60, memory: "512MiB" }, (req) => {
     try {
         const data = (req.data ?? {});
         const requestId = String(data.requestId ?? "");
@@ -83,7 +81,6 @@ exports.actCallV2 = (0, https_1.onCall)({ timeoutSeconds: 60, memory: "512MiB" }
             throw new https_1.HttpsError("invalid-argument", "Interpretação incompleta.");
         }
         logger.info("actCallV2 received", { requestId, tenantId, role, text });
-        // —— parser “entrada …”
         const entrada = parseEntrada(text);
         if (entrada) {
             const { produto, quantidade, preco } = entrada;
@@ -101,7 +98,6 @@ exports.actCallV2 = (0, https_1.onCall)({ timeoutSeconds: 60, memory: "512MiB" }
                 parsed: { produto, quantidade, preco },
             };
         }
-        // —— fallback
         return {
             requestId,
             ok: true,
@@ -115,4 +111,55 @@ exports.actCallV2 = (0, https_1.onCall)({ timeoutSeconds: 60, memory: "512MiB" }
             throw err;
         throw new https_1.HttpsError("internal", "Falha interna.", String(err?.message ?? err));
     }
+});
+// Extrai texto do GenerateContentResponse sem usar .text()
+function extractGeminiText(resp) {
+    try {
+        const parts = resp?.candidates?.[0]?.content?.parts ?? [];
+        const txt = parts.map((p) => p?.text ?? "").join("");
+        return (txt || "").trim();
+    }
+    catch {
+        return "";
+    }
+}
+exports.chatRespond = (0, https_1.onCall)({ timeoutSeconds: 60, memory: "512MiB" }, async (req) => {
+    const text = String(req.data?.text ?? "").trim();
+    if (!text)
+        return { reply: "Ok." };
+    // ---- Fallback local para comandos de estoque
+    const entradaR = /\b(entrada|dar entrada|estoque\+)\b/i;
+    const saidaR = /\b(sa[ií]da|venda|baixar estoque)\b/i;
+    if (entradaR.test(text)) {
+        return { reply: 'Para lançar **entrada**, abra o produto e toque em **Registrar entrada**.' };
+    }
+    if (saidaR.test(text)) {
+        return { reply: 'Para registrar **saída/venda**, use o botão **Vender** na tela Início.' };
+    }
+    // ---- Vertex opcional (ativar com variável de ambiente ENABLE_VERTEX=1)
+    if (process.env.ENABLE_VERTEX === "1") {
+        try {
+            // eslint-disable-next-line @typescript-eslint/no-var-requires
+            const { VertexAI } = require("@google-cloud/vertexai"); // import dinâmico
+            const project = process.env.GCLOUD_PROJECT || process.env.GCP_PROJECT;
+            const location = process.env.VERTEX_LOCATION || "us-central1"; // região suportada pelo Gemini
+            const modelId = process.env.VERTEX_MODEL || "gemini-1.5-flash-8b";
+            const vertexAI = new VertexAI({ project, location });
+            const model = vertexAI.getGenerativeModel({ model: modelId });
+            const result = await model.generateContent({
+                contents: [{ role: "user", parts: [{ text }] }],
+            });
+            const reply = extractGeminiText(result?.response) || "Ok.";
+            return { reply };
+        }
+        catch (err) {
+            logger.warn("vertex-fallback", { err: String(err) });
+            // cai no fallback abaixo
+        }
+    }
+    // ---- Resposta padrão local
+    return {
+        reply: "Posso ajudar com consultas de estoque, itens em falta e sugestões. " +
+            "Para **entrada** use a tela do produto; para **saída** use **Vender**.",
+    };
 });

@@ -2,7 +2,6 @@ import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-
 import '../tenant/tenant_provider.dart';
 
 class ProductDetailPage extends ConsumerStatefulWidget {
@@ -18,9 +17,7 @@ class _ProductDetailPageState extends ConsumerState<ProductDetailPage> {
   Widget build(BuildContext context) {
     final tenantId = ref.watch(tenantIdProvider);
     if (tenantId == null) {
-      return const Scaffold(
-        body: Center(child: Text('Selecione uma loja.')),
-      );
+      return const Scaffold(body: Center(child: Text('Selecione uma loja.')));
     }
 
     final docRef = FirebaseFirestore.instance
@@ -43,26 +40,23 @@ class _ProductDetailPageState extends ConsumerState<ProductDetailPage> {
       body: StreamBuilder<DocumentSnapshot<Map<String, dynamic>>>(
         stream: docRef.snapshots(),
         builder: (context, snap) {
-          if (snap.hasError) {
-            return Center(child: Text('Erro: ${snap.error}'));
-          }
-          if (!snap.hasData) {
+          if (snap.hasError) return Center(child: Text('Erro: ${snap.error}'));
+          if (!snap.hasData)
             return const Center(child: CircularProgressIndicator());
-          }
           final data = snap.data!.data();
-          if (data == null) {
+          if (data == null)
             return const Center(child: Text('Produto não encontrado.'));
-          }
 
           return ListView(
             padding: const EdgeInsets.all(16),
             children: [
-              _row('Nome', data['nome'] ?? ''),
-              _row('Categoria', data['categoria'] ?? ''),
-              _row('SKU', data['sku'] ?? ''),
-              _row('Preço', (data['preco'] ?? 0).toString()),
-              _row('Quantidade', (data['quantidade'] ?? 0).toString()),
-              _row('Estoque mínimo', (data['estoqueMinimo'] ?? 0).toString()),
+              _row('Nome', (data['nome'] ?? '').toString()),
+              _row('Categoria', (data['categoria'] ?? '').toString()),
+              _row('SKU', (data['sku'] ?? '').toString()),
+              _row('Preço',
+                  'R\$ ${((data['preco'] as num?)?.toDouble() ?? 0).toStringAsFixed(2)}'),
+              _row('Quantidade', '${data['quantidade'] ?? 0}'),
+              _row('Estoque mínimo', '${data['estoqueMinimo'] ?? 0}'),
             ],
           );
         },
@@ -70,25 +64,20 @@ class _ProductDetailPageState extends ConsumerState<ProductDetailPage> {
     );
   }
 
-  Widget _row(String k, String v) {
-    return Padding(
-      padding: const EdgeInsets.symmetric(vertical: 8),
-      child: Row(
-        children: [
+  Widget _row(String k, String v) => Padding(
+        padding: const EdgeInsets.symmetric(vertical: 8),
+        child: Row(children: [
           SizedBox(
               width: 150,
               child:
                   Text(k, style: const TextStyle(fontWeight: FontWeight.w600))),
           Expanded(child: Text(v)),
-        ],
-      ),
-    );
-  }
+        ]),
+      );
 
   Future<void> _showEntradaDialog(BuildContext context, String tenantId) async {
     final qtdCtrl = TextEditingController(text: '1');
     final custoCtrl = TextEditingController();
-
     String? err;
 
     await showDialog(
@@ -114,7 +103,6 @@ class _ProductDetailPageState extends ConsumerState<ProductDetailPage> {
                   .collection('produtos')
                   .doc(widget.productId);
 
-              // Transaction: soma quantidade
               await db.runTransaction((tx) async {
                 final snap = await tx.get(prodRef);
                 if (!snap.exists) throw Exception('Produto não encontrado.');
@@ -126,7 +114,8 @@ class _ProductDetailPageState extends ConsumerState<ProductDetailPage> {
                 });
               });
 
-              // Log no histórico
+              final total = (custo ?? 0) * qtd;
+
               await db
                   .collection('tenants')
                   .doc(tenantId)
@@ -139,6 +128,7 @@ class _ProductDetailPageState extends ConsumerState<ProductDetailPage> {
                 'origem': 'product_detail',
                 'motivo': 'entrada manual',
                 if (custo != null) 'unitCost': custo,
+                'totalValue': total,
                 'createdAt': FieldValue.serverTimestamp(),
               });
 
@@ -169,8 +159,7 @@ class _ProductDetailPageState extends ConsumerState<ProductDetailPage> {
                   TextField(
                     controller: custoCtrl,
                     decoration: const InputDecoration(
-                      labelText: 'Custo unitário (opcional)',
-                    ),
+                        labelText: 'Custo unitário (opcional)'),
                     keyboardType:
                         const TextInputType.numberWithOptions(decimal: true),
                   ),
@@ -187,13 +176,9 @@ class _ProductDetailPageState extends ConsumerState<ProductDetailPage> {
             ),
             actions: [
               TextButton(
-                onPressed: () => Navigator.pop(context),
-                child: const Text('Cancelar'),
-              ),
-              FilledButton(
-                onPressed: salvar,
-                child: const Text('Salvar'),
-              ),
+                  onPressed: () => Navigator.pop(context),
+                  child: const Text('Cancelar')),
+              FilledButton(onPressed: salvar, child: const Text('Salvar')),
             ],
           );
         },
