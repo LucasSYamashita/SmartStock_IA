@@ -1,217 +1,141 @@
-// lib/features/chat/chat_controller.dart
-import 'dart:math';
 import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:cloud_functions/cloud_functions.dart';
+import 'package:firebase_auth/firebase_auth.dart';
+import '../../config/feature_flags.dart';
+import 'fallback_inventory.dart';
 
-import 'chat_message.dart';
-import 'nlu.dart'; // MoveIntent / parseCommand
-import 'chat_backend.dart'; // makeChatBackend()
+class ChatResult {
+  final String message;
+  final String intent;
+  final String? produto;
+  final int? quantidade;
+  final double? preco;
 
-class ChatController {
-  final String tenantId;
-  final String role; // 'admin' | 'staff' | 'viewer'
-  final String userId;
-
-  final List<ChatMessage> messages = [];
-
-  // Random.secure() pode travar no web; use Random() simples
-  final _rnd = Random();
-  String? _pendingId; // id de idempotência
-  bool _busy = false;
-
-  MoveIntent? _pendingMove; // última proposta pendente
-  final ChatBackend _backend = makeChatBackend(FirebaseFirestore.instance);
-
-  ChatController({
-    required this.tenantId,
-    required this.role,
-    required this.userId,
+  ChatResult({
+    required this.message,
+    required this.intent,
+    this.produto,
+    this.quantidade,
+    this.preco,
   });
 
-  bool get hasPendingMove => _pendingMove != null;
-
-  String _newId() {
-    final t = DateTime.now().microsecondsSinceEpoch.toRadixString(36);
-    final r = _rnd.nextInt(1 << 30).toRadixString(36);
-    return '$t$r';
-  }
-
-  Future<String> _getOrCreateProdutoByName({
-    required String name,
-    double? preco,
-  }) async {
-    final db = FirebaseFirestore.instance;
-    final col = db.collection('tenants').doc(tenantId).collection('produtos');
-    final nomeLower = name.toLowerCase().trim();
-
-    final q = await col.where('nomeLower', isEqualTo: nomeLower).limit(1).get();
-    if (q.docs.isNotEmpty) {
-      final doc = q.docs.first;
-      if (preco != null && preco >= 0) {
-        await doc.reference.update({
-          'preco': preco,
-          'updatedAt': FieldValue.serverTimestamp(),
-          'updatedBy': userId,
-        });
-      }
-      return doc.id;
-    }
-
-    final doc = await col.add({
-      'nome': name,
-      'nomeLower': nomeLower,
-      'categoria': '',
-      'sku': '',
-      'preco': (preco != null && preco >= 0) ? preco : 0.0,
-      'quantidade': 0,
-      'estoqueMinimo': 1,
-      'ativo': true,
-      'createdAt': FieldValue.serverTimestamp(),
-      'createdBy': userId,
-      'updatedAt': FieldValue.serverTimestamp(),
-      'updatedBy': userId,
-    });
-    return doc.id;
-  }
-
-  /// Envia texto do usuário
-  Future<void> send(String raw, {void Function()? onChange}) async {
-    final text = raw.trim();
-    if (text.isEmpty) return;
-
-    // atalhos: confirmar/cancelar por texto
-    final t = text.toLowerCase();
-    if (t == 'confirmar' && _pendingMove != null) {
-      await confirmPending(onChange: onChange);
-      return;
-    }
-    if (t == 'cancelar' && _pendingMove != null) {
-      cancelPending(onChange: onChange);
-      messages.add(
-        ChatMessage(role: 'assistant', text: 'Operação cancelada.'),
+  factory ChatResult.fromMap(Map<String, dynamic> map) => ChatResult(
+        message: map['message'] ?? '',
+        intent: map['intent'] ?? 'geral',
+        produto: map['produto'],
+        quantidade: map['quantidade'],
+        preco: (map['preco'] is num)
+            ? (map['preco'] as num).toDouble()
+            : double.tryParse('${map['preco'] ?? ''}'),
       );
-      onChange?.call();
-      return;
-    }
+}
 
-    messages.add(ChatMessage(role: 'user', text: text));
-    onChange?.call();
+abstract class ChatBackend {
+  Future<ChatResult> respond({
+    required String tenantId,
+    required String userId,
+    required String text,
+  });
+}
 
-    _pendingId ??= _newId();
+/// 🔹 BACKEND PRINCIPAL: Cloud Function (IA + Firestore remoto)
+class CloudFunctionsChatBackend implements ChatBackend {
+  final FirebaseFunctions functions =
+      FirebaseFunctions.instanceFor(region: 'southamerica-east1');
+  final ChatBackend fallback;
 
-    // 1) NLU local -> se reconheceu movimento, apenas propõe
-    final intent = parseCommand(text);
-    if (intent is MoveIntent) {
-      _pendingMove = intent;
-      final resumo = intent.tipo == 'entrada' ? 'entrada' : 'saída';
-      final conf = 'Proposta: $resumo de ${intent.quantidade} un. em '
-          '"${intent.produtoNome}"'
-          '${intent.preco != null ? ' a ${intent.preco!.toStringAsFixed(2)}' : ''}. '
-          'Confirmar?';
-      messages.add(ChatMessage(role: 'assistant', text: conf));
-      onChange?.call();
-      return;
-    }
+  CloudFunctionsChatBackend({required this.fallback});
 
-    // 2) Qualquer outra coisa -> backend (Functions com fallback local)
+  @override
+  Future<ChatResult> respond({
+    required String tenantId,
+    required String userId,
+    required String text,
+  }) async {
     try {
-      final res = await _backend.respond(
+      print(
+          '🛰 Enviando para chatRespond: tenant=$tenantId user=$userId text=$text');
+
+      final callable = functions.httpsCallable('chatRespond');
+      final res = await callable.call({
+        'tenantId': tenantId,
+        'userId': userId,
+        'text': text,
+        'enableVertex': kEnableVertex,
+      });
+
+      final data = Map<String, dynamic>.from(res.data ?? {});
+      print('✅ chatRespond retorno: $data');
+      return ChatResult.fromMap(data);
+    } catch (e) {
+      print('⚠️ Erro Cloud Function: $e — usando fallback local');
+      return fallback.respond(
         tenantId: tenantId,
         userId: userId,
         text: text,
       );
-      messages.add(ChatMessage(role: 'assistant', text: res.reply));
-    } catch (_) {
-      messages.add(ChatMessage(
-        role: 'assistant',
-        text: 'Não consegui responder agora. Tente novamente.',
-      ));
-    }
-    onChange?.call();
-  }
-
-  /// Confirma a última movimentação proposta (idempotente)
-  Future<void> confirmPending({void Function()? onChange}) async {
-    final move = _pendingMove;
-    if (move == null || _busy) return;
-
-    _busy = true;
-    final id = _pendingId ?? _newId();
-
-    final db = FirebaseFirestore.instance;
-    final movRef =
-        db.collection('tenants').doc(tenantId).collection('movimentos').doc(id);
-
-    try {
-      await db.runTransaction((tx) async {
-        final produtoId = await _getOrCreateProdutoByName(
-          name: move.produtoNome,
-          preco: move.preco,
-        );
-
-        // idempotência
-        final exists = await tx.get(movRef);
-        if (exists.exists) {
-          throw StateError('already-exists');
-        }
-
-        final movData = <String, dynamic>{
-          'tipo': move.tipo, // 'entrada' | 'saida'
-          'produtoId': produtoId,
-          'produtoNome': move.produtoNome,
-          'quantidade': move.quantidade,
-          'usuarioId': userId,
-          'origem': 'chat',
-          'motivo': move.motivo ?? 'chatbot',
-          'requestId': id,
-          'createdAt': FieldValue.serverTimestamp(),
-        };
-        if (move.preco != null) movData['preco'] = move.preco;
-
-        tx.set(movRef, movData);
-
-        final prodRef = db
-            .collection('tenants')
-            .doc(tenantId)
-            .collection('produtos')
-            .doc(produtoId);
-
-        tx.update(prodRef, {
-          'quantidade': FieldValue.increment(
-            move.tipo == 'entrada' ? move.quantidade : -move.quantidade,
-          ),
-          'updatedAt': FieldValue.serverTimestamp(),
-          'updatedBy': userId,
-        });
-      });
-
-      messages.add(ChatMessage(
-        role: 'assistant',
-        text:
-            '✅ ${move.tipo == 'entrada' ? 'Entrada' : 'Saída'} registrada com sucesso.',
-      ));
-    } on StateError catch (e) {
-      messages.add(ChatMessage(
-        role: 'assistant',
-        text: e.message == 'already-exists'
-            ? 'ℹ️ Esta movimentação já havia sido registrada (idempotente).'
-            : 'Erro ao confirmar. Tente novamente.',
-      ));
-    } catch (_) {
-      messages.add(ChatMessage(
-        role: 'assistant',
-        text: 'Erro ao confirmar. Tente novamente.',
-      ));
-    } finally {
-      _busy = false;
-      _pendingId = null;
-      _pendingMove = null;
-      onChange?.call();
     }
   }
+}
 
-  void cancelPending({void Function()? onChange}) {
-    _pendingId = null;
-    _pendingMove = null;
-    onChange?.call();
+/// 🔹 FALLBACK LOCAL: usa Firestore direto (sem função)
+class LocalChatBackend implements ChatBackend {
+  final FirebaseFirestore db;
+  final FallbackInventory inventory;
+  LocalChatBackend(this.db) : inventory = FallbackInventory(db);
+
+  @override
+  Future<ChatResult> respond({
+    required String tenantId,
+    required String userId,
+    required String text,
+  }) async {
+    final t = text.toLowerCase().trim();
+    final match = RegExp(r'entrada\s+(\d+)\s+(.+?)(?:\s+a\s+(\d+[.,]?\d*))?$')
+        .firstMatch(t);
+
+    if (match != null) {
+      final qtd = int.tryParse(match.group(1)!) ?? 0;
+      final nome = match.group(2)!.trim();
+      final preco = match.group(3) != null
+          ? double.tryParse(match.group(3)!.replaceAll(',', '.'))
+          : null;
+
+      print('⚙️ Fallback: registrando $qtd x $nome no tenant $tenantId');
+      await inventory.registrar(
+        tenantId: tenantId,
+        nome: nome, // já existe no seu match do RegExp
+        quantidade: qtd, // idem
+        tipo: "entrada",
+        preco: preco,
+      );
+
+      return ChatResult(
+        message:
+            '✅ Entrada registrada localmente: ${qtd}x $nome ${preco != null ? "a R\$${preco.toStringAsFixed(2)}" : ""}.',
+        intent: 'entrada',
+        produto: nome,
+        quantidade: qtd,
+        preco: preco,
+      );
+    }
+
+    if (t.contains('baixo estoque')) {
+      return ChatResult(
+        message: 'Verificando baixo estoque...',
+        intent: 'consulta',
+      );
+    }
+
+    return ChatResult(
+      message:
+          'Posso ajudar com **estoque, vendas e sugestões**. Ex: "entrada 10 coca a 8,50".',
+      intent: 'geral',
+    );
   }
+}
+
+/// 🔹 Usa Function + Fallback automático
+ChatBackend makeChatBackend(FirebaseFirestore db) {
+  return CloudFunctionsChatBackend(fallback: LocalChatBackend(db));
 }

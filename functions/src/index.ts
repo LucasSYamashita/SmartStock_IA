@@ -1,174 +1,254 @@
 import * as admin from "firebase-admin";
-import { onCall, HttpsError } from "firebase-functions/v2/https";
-import { setGlobalOptions } from "firebase-functions/v2/options";
-import * as logger from "firebase-functions/logger";
+import * as functions from "firebase-functions";
+import cors from "cors";
 
-setGlobalOptions({ region: "southamerica-east1", maxInstances: 5 });
 admin.initializeApp();
+const corsHandler = cors({ origin: true });
 
-/* ========= Tipos ========= */
-export type ActCallInput = {
-  requestId: string;
-  tenantId: string;
-  role: string;       // 'admin' | 'staff' | 'viewer'
-  text: string;
-};
+/* ============ Utils ============ */
+function normalize(text: string): string {
+  return text
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .trim();
+}
 
-export type ActCallOutput = {
-  requestId: string;
-  ok: boolean;
-  message: string;
-  intent?: "entrada" | "desconhecido";
-  parsed?: { produto?: string; quantidade?: number; preco?: number };
-};
+function classifyIntent(t: string): string {
+  if (/\b(entrada|comprar|repor|adicionar)\b/i.test(t)) return "entrada";
+  if (/\b(saida|venda|vender|baixar)\b/i.test(t)) return "saida";
+  if (/\b(quanto|tem|estoque|saldo)\b/i.test(t)) return "consulta";
+  if (/\b(sugira|recomende|indique|baixo estoque|repor|comprar mais)\b/i.test(t))
+    return "sugestao";
+  return "geral";
+}
 
-/* ========= Parser “entrada …” ========= */
-function parseEntrada(text: string) {
-  const t = text.toLowerCase().trim().replace(/\s+/g, " ");
-  if (!t.startsWith("entrada ")) return null;
+function parseMovimento(text: string) {
+  const t = normalize(text);
+  let m;
 
-  const rest = t.substring("entrada ".length).trim();
+  // entrada 10 coca a 8,50
+  m = t.match(/(entrada|repor|comprar)\s+(\d+)\s+(.+?)\s+a\s+(\d+[.,]?\d*)/);
+  if (m)
+    return {
+      tipo: "entrada",
+      quantidade: +m[2],
+      produto: m[3].trim(),
+      preco: parseFloat(m[4].replace(",", ".")),
+    };
 
-  type Hit = { produto: string; quantidade?: number; preco?: number };
-  const tryParse = (
-    m: RegExpMatchArray | null,
-    produtoIdx: number,
-    qtdIdx?: number,
-    precoIdx?: number
-  ): Hit | null => {
-    if (!m) return null;
-    const produto = (m[produtoIdx] ?? "").trim().replace(/["']/g, "");
-    if (!produto) return null;
+  // entrada 10 coca
+  m = t.match(/(entrada|repor|comprar)\s+(\d+)\s+(.+)/);
+  if (m)
+    return {
+      tipo: "entrada",
+      quantidade: +m[2],
+      produto: m[3].trim(),
+    };
 
-    let quantidade: number | undefined = undefined;
-    if (qtdIdx !== undefined && m[qtdIdx]) {
-      const q = Number(String(m[qtdIdx]).replace(",", "."));
-      if (!Number.isNaN(q)) quantidade = q;
-    }
-
-    let preco: number | undefined = undefined;
-    if (precoIdx !== undefined && m[precoIdx]) {
-      const p = Number(String(m[precoIdx]).replace(",", "."));
-      if (!Number.isNaN(p)) preco = p;
-    }
-    return { produto, quantidade, preco };
-  };
-
-  // A) entrada <produto> <qtd>? (a <preco>)?
-  let m = rest.match(/^(.*?)(?:\s+(\d+))?(?:\s+a\s+(\d+[.,]?\d*))?$/i);
-  let hit = tryParse(m, 1, 2, 3);
-  if (hit) return hit;
-
-  // B) entrada (de )?<qtd> (do|da|de)? <produto> (a <preco>)?
-  m = rest.match(/^(?:de\s+)?(\d+)\s+(?:do|da|de)?\s*(.+?)(?:\s+a\s+(\d+[.,]?\d*))?$/i);
-  hit = tryParse(m, 2, 1, 3);
-  if (hit) return hit;
+  // saida 3 coca
+  m = t.match(/(saida|venda|vender|baixar)\s+(\d+)\s+(.+?)(?:\s+a\s+(\d+[.,]?\d*))?$/);
+  if (m)
+    return {
+      tipo: "saida",
+      quantidade: +m[2],
+      produto: m[3].trim(),
+      preco: m[4] ? parseFloat(m[4].replace(",", ".")) : undefined,
+    };
 
   return null;
 }
 
-/* ========= Callable (sem CORS) ========= */
-export const actCallV2 = onCall<ActCallInput, ActCallOutput>(
-  { timeoutSeconds: 60, memory: "512MiB" },
-  (req) => {
-    try {
-      const data = (req.data ?? {}) as Partial<ActCallInput>;
-      const requestId = String(data.requestId ?? "");
-      const tenantId  = String(data.tenantId  ?? "");
-      const role      = String(data.role      ?? "");
-      const text      = String(data.text      ?? "");
+/* ============ Função auxiliar de estoque ============ */
+async function registrarMovimento(
+  tenantId: string,
+  userId: string,
+  tipo: "entrada" | "saida",
+  produtoNome: string,
+  quantidade: number,
+  preco?: number
+) {
+  const db = admin.firestore();
+  const nomeLower = produtoNome.toLowerCase();
 
-      if (!requestId || !tenantId || !role || !text) {
-        logger.warn("invalid-argument", { requestId, tenantId, role, text });
-        throw new HttpsError("invalid-argument", "Interpretação incompleta.");
-      }
+  const colProd = db.collection("tenants").doc(tenantId).collection("produtos");
+  const snap = await colProd.where("nomeLower", "==", nomeLower).limit(1).get();
 
-      logger.info("actCallV2 received", { requestId, tenantId, role, text });
+  let ref: FirebaseFirestore.DocumentReference<FirebaseFirestore.DocumentData>;
+  let data: any;
 
-      const entrada = parseEntrada(text);
-      if (entrada) {
-        const { produto, quantidade, preco } = entrada;
-        let msg = `Proposta: entrada em "${produto}"`;
-        if (quantidade !== undefined) msg += ` de ${quantidade} un.`;
-        if (preco      !== undefined) msg += ` a ${preco.toFixed(2)}`;
-        msg += `. Confirmar?`;
-
-        return {
-          requestId,
-          ok: true,
-          message: msg,
-          intent: "entrada",
-          parsed: { produto, quantidade, preco },
-        };
-      }
-
-      return {
-        requestId,
-        ok: true,
-        intent: "desconhecido",
-        message:
-          'Não entendi. Tente: "entrada coca-cola", "entrada coca-cola 10" ou "entrada coca-cola 10 a 5,50".',
-      };
-    } catch (err: any) {
-      logger.error("actCallV2 error", { err });
-      if (err instanceof HttpsError) throw err;
-      throw new HttpsError("internal", "Falha interna.", String(err?.message ?? err));
-    }
+  if (snap.empty) {
+    ref = await colProd.add({
+      nome: produtoNome,
+      nomeLower,
+      quantidade: tipo === "entrada" ? quantidade : 0,
+      preco: preco ?? 0,
+      estoqueMinimo: 1,
+      ativo: true,
+      categoria: "",
+      sku: "",
+      createdBy: userId,
+      updatedBy: userId,
+      createdAt: admin.firestore.FieldValue.serverTimestamp(),
+      updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+    });
+    data = { quantidade: 0, preco: preco ?? 0 };
+  } else {
+    ref = snap.docs[0].ref;
+    data = snap.docs[0].data();
   }
-);
 
-/* ========= Chat opcional (Vertex) — também callable ========= */
-type ChatInput  = { tenantId?: string; userId?: string; text?: string };
-type ChatOutput = { reply: string };
+  const atual = data.quantidade ?? 0;
+  const delta = tipo === "entrada" ? quantidade : -quantidade;
+  const novoEstoque = Math.max(atual + delta, 0);
 
-// extrai texto do objeto do Gemini sem usar .text()
-function extractGeminiText(resp: any): string {
-  try {
-    const parts = resp?.candidates?.[0]?.content?.parts ?? [];
-    return (parts.map((p: any) => p?.text ?? "").join("") || "").trim();
-  } catch { return ""; }
+  await ref.update({
+    quantidade: novoEstoque,
+    preco: preco ?? data.preco ?? 0,
+    updatedBy: userId,
+    updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+  });
+
+  // 🔧 Ajuste: garantir gravação de movimento com preço e valor total
+  await db
+    .collection("tenants")
+    .doc(tenantId)
+    .collection("movimentos")
+    .add({
+      tipo,
+      produtoId: ref.id,
+      produtoNome: produtoNome,
+      quantidade,
+      preco: preco ?? data.preco ?? 0,
+      valorTotal: (preco ?? data.preco ?? 0) * quantidade,
+      usuarioId: userId,
+      tenantId,
+      origem: "chat",
+      motivo: tipo === "entrada" ? "Entrada via chat" : "Saída via chat",
+      createdAt: admin.firestore.FieldValue.serverTimestamp(),
+    });
+
+  return novoEstoque;
 }
 
-export const chatRespond = onCall<ChatInput, ChatOutput>(
-  { timeoutSeconds: 60, memory: "512MiB" },
-  async (req): Promise<ChatOutput> => {
-    const text = String(req.data?.text ?? "").trim();
-    if (!text) return { reply: "Ok." };
+/* ============ SUGESTÃO LOCAL ============ */
+async function gerarSugestaoLocal(tenantId: string): Promise<string> {
+  const db = admin.firestore();
+  const snap = await db
+    .collection("tenants")
+    .doc(tenantId)
+    .collection("produtos")
+    .where("quantidade", "<=", 3)
+    .limit(5)
+    .get();
 
-    // Fallback local rápido (orienta telas certas)
-    if (/\b(entrada|dar entrada|estoque\+)\b/i.test(text)) {
-      return { reply: 'Para lançar **entrada**, abra o produto e toque em **Registrar entrada**.' };
-    }
-    if (/\b(sa[ií]da|venda|baixar estoque)\b/i.test(text)) {
-      return { reply: 'Para registrar **saída/venda**, use o botão **Vender** na tela Início.' };
-    }
+  if (snap.empty)
+    return "📦 Nenhum item com baixo estoque.";
 
-    if (process.env.ENABLE_VERTEX === "1") {
+  const lista = snap.docs.map(
+    (d) => `${d.data().nome} (qtd ${d.data().quantidade})`
+  );
+  return `🔎 Itens com baixo estoque: ${lista.join(", ")}.`;
+}
+
+/* ============ ENDPOINT PRINCIPAL ============ */
+export const chatRespond = functions
+  .region("southamerica-east1")
+  .https.onRequest((req, res) => {
+    corsHandler(req, res, async () => {
       try {
-        // import dinâmico p/ não exigir o pacote se Vertex estiver desligado
-        // eslint-disable-next-line @typescript-eslint/no-var-requires
-        const { VertexAI } = require("@google-cloud/vertexai");
-        const project  = process.env.GCLOUD_PROJECT || process.env.GCP_PROJECT;
-        const location = process.env.VERTEX_LOCATION || "us-central1";
-        const modelId  = process.env.VERTEX_MODEL || "gemini-1.5-flash-8b";
+        const text = String(req.body?.text ?? "").trim();
+        const tenantId = req.body?.tenantId ?? "";
+        const userId = req.body?.userId ?? "";
 
-        const vertexAI = new VertexAI({ project, location });
-        const model = vertexAI.getGenerativeModel({ model: modelId });
-        const result = await model.generateContent({
-          contents: [{ role: "user", parts: [{ text }] }],
-        });
+        if (!text || !tenantId || !userId) {
+          return res.status(400).json({
+            ok: false,
+            intent: "erro",
+            message: "Parâmetros ausentes: tenantId, userId ou texto.",
+          });
+        }
 
-        const reply = extractGeminiText(result?.response) || "Ok.";
-        return { reply };
-      } catch (err) {
-        logger.warn("vertex-fallback", { err: String(err) });
-      }
-    }
+        const t = normalize(text);
+        const intent = classifyIntent(t);
 
-    return {
-      reply:
-        "Posso ajudar com consultas de estoque, itens em falta e sugestões. " +
-        "Para **entrada** use a tela do produto; para **saída** use **Vender**.",
-    };
-  }
+        // ===== ENTRADA / SAÍDA =====
+        if (intent === "entrada" || intent === "saida") {
+          const parsed = parseMovimento(t);
+          if (parsed?.produto && tenantId && userId) {
+           const novoEstoque = await registrarMovimento(
+  tenantId,
+  userId,
+  parsed.tipo as "entrada" | "saida",
+  parsed.produto,
+  parsed.quantidade ?? 1,
+  parsed.preco
 );
+
+
+            return res.json({
+              ok: true,
+              intent: parsed.tipo,
+              message:
+                parsed.tipo === "entrada"
+                  ? `✅ Entrada registrada: +${parsed.quantidade}x ${parsed.produto}. Novo estoque: ${novoEstoque}.`
+                  : `✅ Saída registrada: -${parsed.quantidade}x ${parsed.produto}. Estoque atual: ${novoEstoque}.`,
+            });
+          }
+          return res.json({
+            ok: false,
+            intent,
+            message: "Não encontrei produto ou tenant.",
+          });
+        }
+
+        // ===== CONSULTA =====
+        if (intent === "consulta" && tenantId) {
+          const nome = t.replace(/(quanto|tem|estoque|saldo|de)/g, "").trim();
+          const snap = await admin
+            .firestore()
+            .collection("tenants")
+            .doc(tenantId)
+            .collection("produtos")
+            .where("nomeLower", "==", nome.toLowerCase())
+            .limit(1)
+            .get();
+
+          if (snap.empty)
+            return res.json({
+              ok: true,
+              intent,
+              message: `Produto "${nome}" não encontrado.`,
+            });
+
+          const data = snap.docs[0].data();
+          return res.json({
+            ok: true,
+            intent,
+            message: `📦 ${data.nome}: ${data.quantidade} unidade(s) em estoque.`,
+          });
+        }
+
+        // ===== SUGESTÃO =====
+        if (intent === "sugestao") {
+          const msg = await gerarSugestaoLocal(tenantId);
+          return res.json({ ok: true, intent, message: msg });
+        }
+
+        // ===== GERAL =====
+        return res.json({
+          ok: true,
+          intent: "geral",
+          message:
+            "Posso ajudar com **entrada**, **saída**, **consulta** e **sugestão**. Ex: 'entrada 10 coca a 8,50', 'venda 3 coca', 'o que repor?'.",
+        });
+      } catch (err: any) {
+        console.error("❌ Erro interno:", err);
+        res.status(500).json({
+          ok: false,
+          intent: "erro",
+          message: "Erro interno no servidor: " + String(err?.message),
+        });
+      }
+    });
+  });

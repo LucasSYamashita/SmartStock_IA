@@ -3,7 +3,6 @@ import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:url_launcher/url_launcher.dart';
-
 import '../tenant/tenant_provider.dart';
 
 class MovementHistoryPage extends ConsumerStatefulWidget {
@@ -39,7 +38,7 @@ class _MovementHistoryPageState extends ConsumerState<MovementHistoryPage> {
 
     return Scaffold(
       appBar: AppBar(
-        title: const Text('Histórico'),
+        title: const Text('Histórico de movimentações'),
         actions: [
           IconButton(
             tooltip: 'Compartilhar',
@@ -60,7 +59,6 @@ class _MovementHistoryPageState extends ConsumerState<MovementHistoryPage> {
             pagamento: _pay,
             onChangeTipo: (v) => setState(() {
               _tipo = v;
-              // se não for saída, zera o filtro de pagamento (conserta bug do filtro)
               if (_tipo != 'saida') _pay = 'todos';
             }),
             onChangePagamento: (v) => setState(() => _pay = v),
@@ -76,16 +74,15 @@ class _MovementHistoryPageState extends ConsumerState<MovementHistoryPage> {
                 if (!snap.hasData) {
                   return const Center(child: CircularProgressIndicator());
                 }
+
                 final docs = snap.data!.docs;
                 if (docs.isEmpty) {
                   return const Center(child: Text('Sem movimentações.'));
                 }
 
-                // Totais (R$) calculados no cliente
                 double totEntradas = 0, totSaidas = 0;
-
-                // Monta lista
                 final tiles = <Widget>[];
+
                 for (final d in docs) {
                   final m = d.data();
                   final tipo = (m['tipo'] ?? '').toString();
@@ -96,11 +93,19 @@ class _MovementHistoryPageState extends ConsumerState<MovementHistoryPage> {
                   final ts = m['createdAt'];
                   final dt = ts is Timestamp ? ts.toDate() : null;
 
-                  // unit e total
+                  // 🔹 pega preço de qualquer campo possível
                   final unitCost = (m['unitCost'] as num?)?.toDouble();
                   final unitPrice = (m['unitPrice'] as num?)?.toDouble();
-                  double total = (m['totalValue'] as num?)?.toDouble() ??
-                      (((tipo == 'entrada' ? unitCost : unitPrice) ?? 0) * qtd);
+                  final totalValue = (m['totalValue'] as num?)?.toDouble();
+                  final preco = (m['preco'] as num?)?.toDouble();
+
+                  // 🔹 prioridade: totalValue > unitCost/unitPrice > preco
+                  final total = totalValue ??
+                      (((tipo == 'entrada'
+                                  ? (unitCost ?? preco)
+                                  : (unitPrice ?? preco)) ??
+                              0.0) *
+                          qtd);
 
                   if (tipo == 'entrada') {
                     totEntradas += total;
@@ -117,10 +122,7 @@ class _MovementHistoryPageState extends ConsumerState<MovementHistoryPage> {
                       'Motivo: ${m['motivo']}',
                     if (tipo == 'saida' && pay.isNotEmpty)
                       'Pagamento: ${_labelPay(pay)}',
-                    if (tipo == 'entrada' && unitCost != null)
-                      'Custo: ${_brl(unitCost)}',
-                    if (tipo == 'saida' && unitPrice != null)
-                      'Preço: ${_brl(unitPrice)}',
+                    if (preco != null) 'Preço: ${_brl(preco)}',
                   ].join(' · ');
 
                   tiles.add(
@@ -155,7 +157,6 @@ class _MovementHistoryPageState extends ConsumerState<MovementHistoryPage> {
                   );
                 }
 
-                // Header com totais
                 final header = Container(
                   padding:
                       const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
@@ -185,8 +186,9 @@ class _MovementHistoryPageState extends ConsumerState<MovementHistoryPage> {
 
                 return ListView.separated(
                   itemCount: tiles.length + 1,
-                  separatorBuilder: (_, i) =>
-                      i == 0 ? const SizedBox.shrink() : Divider(height: 1),
+                  separatorBuilder: (_, i) => i == 0
+                      ? const SizedBox.shrink()
+                      : const Divider(height: 1),
                   itemBuilder: (_, i) {
                     if (i == 0) return header;
                     return tiles[i - 1];
@@ -199,8 +201,6 @@ class _MovementHistoryPageState extends ConsumerState<MovementHistoryPage> {
       ),
     );
   }
-
-  // Helpers
 
   static String _brl(double v) => 'R\$ ${v.toStringAsFixed(2)}';
 
@@ -246,22 +246,16 @@ class _MovementHistoryPageState extends ConsumerState<MovementHistoryPage> {
         final dt = ts is Timestamp ? _fmt(ts.toDate()) : '';
         final pay = (m['paymentMethod'] ?? '').toString();
 
-        final unitCost = (m['unitCost'] as num?)?.toDouble();
-        final unitPrice = (m['unitPrice'] as num?)?.toDouble();
-        final total = (m['totalValue'] as num?)?.toDouble() ??
-            (((tipo == 'ENTRADA' ? unitCost : unitPrice) ?? 0) * qtd);
+        final preco = (m['preco'] as num?)?.toDouble() ?? 0.0;
+        final total = preco * qtd;
 
         if (tipo == 'ENTRADA') totE += total;
         if (tipo == 'SAIDA') totS += total;
 
         final paySuf =
             tipo == 'SAIDA' && pay.isNotEmpty ? ' · ${_labelPay(pay)}' : '';
-        final unitSuf = tipo == 'ENTRADA'
-            ? (unitCost != null ? ' · Custo ${_brl(unitCost)}' : '')
-            : (unitPrice != null ? ' · Preço ${_brl(unitPrice)}' : '');
 
-        lines.add(
-            '• $tipo · $qtd × $nome · $dt$paySuf$unitSuf · Valor ${_brl(total)}');
+        lines.add('• $tipo · $qtd × $nome · $dt$paySuf · Valor ${_brl(total)}');
       }
 
       lines.add('');
@@ -291,9 +285,8 @@ class _MovementHistoryPageState extends ConsumerState<MovementHistoryPage> {
           'produtoId',
           'produtoNome',
           'paymentMethod',
-          'unitCost',
-          'unitPrice',
-          'totalValue',
+          'preco',
+          'valorTotal',
           'motivo',
           'origem',
           'usuarioId',
@@ -307,11 +300,8 @@ class _MovementHistoryPageState extends ConsumerState<MovementHistoryPage> {
 
         final tipo = (m['tipo'] ?? '').toString();
         final qtd = (m['quantidade'] ?? 0) as int;
-
-        final unitCost = (m['unitCost'] as num?)?.toDouble();
-        final unitPrice = (m['unitPrice'] as num?)?.toDouble();
-        final total = (m['totalValue'] as num?)?.toDouble() ??
-            (((tipo == 'entrada' ? unitCost : unitPrice) ?? 0) * qtd);
+        final preco = (m['preco'] as num?)?.toDouble() ?? 0.0;
+        final total = preco * qtd;
 
         rows.add([
           tipo,
@@ -319,8 +309,7 @@ class _MovementHistoryPageState extends ConsumerState<MovementHistoryPage> {
           '${m['produtoId'] ?? ''}',
           '${m['produtoNome'] ?? ''}',
           '${m['paymentMethod'] ?? ''}',
-          unitCost?.toStringAsFixed(2) ?? '',
-          unitPrice?.toStringAsFixed(2) ?? '',
+          preco.toStringAsFixed(2),
           total.toStringAsFixed(2),
           '${m['motivo'] ?? ''}',
           '${m['origem'] ?? ''}',
@@ -331,7 +320,7 @@ class _MovementHistoryPageState extends ConsumerState<MovementHistoryPage> {
       final csv = const _Csv().convert(rows);
       final bytes = utf8.encode(csv);
       final blob = Uri.dataFromBytes(bytes, mimeType: 'text/csv');
-      await launchUrl(blob); // dispara “download” no web
+      await launchUrl(blob);
       if (mounted) {
         ScaffoldMessenger.of(context)
             .showSnackBar(const SnackBar(content: Text('CSV gerado.')));

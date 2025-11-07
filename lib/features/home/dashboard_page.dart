@@ -1,7 +1,6 @@
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-
 import '../inbound/manual_entry_page.dart';
 import '../sales/manual_sale_flow.dart' show ManualSaleCatalogPage;
 import '../moviments/movement_history_page.dart';
@@ -17,21 +16,20 @@ class DashboardPage extends ConsumerWidget {
     final tenantId = ref.watch(tenantIdProvider);
     if (tenantId == null) {
       return const Center(
-        child: Padding(
-          padding: EdgeInsets.all(24),
-          child: Text(
-              'Nenhuma loja selecionada. Crie/entre em uma loja no Perfil.'),
-        ),
-      );
+          child: Padding(
+              padding: EdgeInsets.all(24),
+              child: Text(
+                  'Nenhuma loja selecionada. Crie/entre em uma loja no Perfil.')));
     }
 
-    // Streams para KPIs
     final now = DateTime.now();
     final firstOfMonth = DateTime(now.year, now.month, 1);
+
     final vendasMesStream = FirebaseFirestore.instance
         .collection('tenants')
         .doc(tenantId)
-        .collection('vendas')
+        .collection('movimentos')
+        .where('tipo', isEqualTo: 'saida')
         .where('createdAt',
             isGreaterThanOrEqualTo: Timestamp.fromDate(firstOfMonth))
         .snapshots();
@@ -54,16 +52,9 @@ class DashboardPage extends ConsumerWidget {
           totalProdutos = prodSnap.data!.docs.length;
           for (final d in prodSnap.data!.docs) {
             final m = d.data();
-            final qAny = m['quantidade'] ?? m['Quantidade'] ?? 0;
-            final vAny = m['preco'] ?? m['valor'] ?? m['precoVenda'] ?? 0;
-            final minAny = m['estoqueMinimo'] ?? m['EstoqueMinimo'] ?? 0;
-
-            final q = qAny is num ? qAny.toInt() : int.tryParse('$qAny') ?? 0;
-            final v =
-                vAny is num ? vAny.toDouble() : double.tryParse('$vAny') ?? 0.0;
-            final min =
-                minAny is num ? minAny.toInt() : int.tryParse('$minAny') ?? 0;
-
+            final q = (m['quantidade'] ?? 0) as num;
+            final v = (m['preco'] ?? 0) as num;
+            final min = (m['estoqueMinimo'] ?? 0) as num;
             saldoEstoque += q * v;
             if (q <= 0)
               semEstoque++;
@@ -77,7 +68,7 @@ class DashboardPage extends ConsumerWidget {
             num vendasDoMes = 0;
             if (venSnap.hasData) {
               for (final d in venSnap.data!.docs) {
-                final any = d.data()['total'] ?? 0;
+                final any = d.data()['valorTotal'] ?? 0;
                 final v = any is num
                     ? any.toDouble()
                     : double.tryParse('$any') ?? 0.0;
@@ -88,7 +79,6 @@ class DashboardPage extends ConsumerWidget {
             return ListView(
               padding: const EdgeInsets.all(16),
               children: [
-                // KPIs
                 Row(
                   children: [
                     Expanded(
@@ -105,30 +95,28 @@ class DashboardPage extends ConsumerWidget {
                 Row(
                   children: [
                     Expanded(
-                      child: _TagCard(
-                        title: 'Sem estoque',
-                        value: '$semEstoque',
-                        color: Theme.of(context).colorScheme.errorContainer,
-                        onColor: Theme.of(context).colorScheme.onErrorContainer,
-                        icon: Icons.block,
-                      ),
-                    ),
+                        child: _TagCard(
+                            title: 'Sem estoque',
+                            value: '$semEstoque',
+                            color: Theme.of(context).colorScheme.errorContainer,
+                            onColor:
+                                Theme.of(context).colorScheme.onErrorContainer,
+                            icon: Icons.block)),
                     const SizedBox(width: 12),
                     Expanded(
-                      child: _TagCard(
-                        title: 'Estoque baixo',
-                        value: '$baixo',
-                        color: Theme.of(context).colorScheme.secondaryContainer,
-                        onColor:
-                            Theme.of(context).colorScheme.onSecondaryContainer,
-                        icon: Icons.warning_amber,
-                      ),
-                    ),
+                        child: _TagCard(
+                            title: 'Estoque baixo',
+                            value: '$baixo',
+                            color: Theme.of(context)
+                                .colorScheme
+                                .secondaryContainer,
+                            onColor: Theme.of(context)
+                                .colorScheme
+                                .onSecondaryContainer,
+                            icon: Icons.warning_amber)),
                   ],
                 ),
                 const SizedBox(height: 16),
-
-                // Grade de atalhos (4 itens)
                 GridView.count(
                   physics: const NeverScrollableScrollPhysics(),
                   crossAxisCount: 2,
@@ -138,46 +126,43 @@ class DashboardPage extends ConsumerWidget {
                   childAspectRatio: 2.6,
                   children: [
                     _MenuPill(
-                      icon: Icons.point_of_sale,
-                      label: 'Vender',
-                      onTap: () => Navigator.of(context).push(
-                        MaterialPageRoute(
-                            builder: (_) => const ManualSaleCatalogPage()),
-                      ),
-                    ),
+                        icon: Icons.point_of_sale,
+                        label: 'Vender',
+                        onTap: () => Navigator.push(
+                            context,
+                            MaterialPageRoute(
+                                builder: (_) =>
+                                    const ManualSaleCatalogPage()))),
                     _MenuPill(
                       icon: Icons.receipt_long,
                       label: 'Relatórios',
                       onTap: () => Navigator.of(context).push(
                         MaterialPageRoute(
-                            builder: (_) => const MovementHistoryPage()),
+                          builder: (_) =>
+                              const MovementHistoryPage(), // usa o novo arquivo
+                        ),
                       ),
                     ),
                     _MenuPill(
-                      icon: Icons.inventory_rounded,
-                      label: 'Entrada manual',
-                      onTap: () => Navigator.of(context).push(
-                        MaterialPageRoute(
-                            builder: (_) => const ManualEntryPage()),
-                      ),
-                    ),
+                        icon: Icons.inventory_rounded,
+                        label: 'Entrada manual',
+                        onTap: () => Navigator.push(
+                            context,
+                            MaterialPageRoute(
+                                builder: (_) => const ManualEntryPage()))),
                     _MenuPill(
-                      icon: Icons.settings_outlined,
-                      label: 'Configurações',
-                      onTap: () => Navigator.of(context).push(
-                        MaterialPageRoute(builder: (_) => const ProfilePage()),
-                      ),
-                    ),
+                        icon: Icons.settings_outlined,
+                        label: 'Configurações',
+                        onTap: () => Navigator.push(
+                            context,
+                            MaterialPageRoute(
+                                builder: (_) => const ProfilePage()))),
                   ],
                 ),
-
                 const SizedBox(height: 16),
-
-                // Card “Saldo em estoque” com botão
                 _StockCard(
-                  totalText: _fmtCurrency(saldoEstoque),
-                  onConsultar: onConsultarEstoque,
-                ),
+                    totalText: _fmtCurrency(saldoEstoque),
+                    onConsultar: onConsultarEstoque),
               ],
             );
           },
@@ -197,27 +182,21 @@ class _BigStatCard extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Card(
-      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
-      child: Padding(
-        padding: const EdgeInsets.all(16),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Text(title),
-            const SizedBox(height: 8),
-            Text(value, style: Theme.of(context).textTheme.headlineMedium),
-          ],
-        ),
-      ),
-    );
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+        child: Padding(
+            padding: const EdgeInsets.all(16),
+            child:
+                Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+              Text(title),
+              const SizedBox(height: 8),
+              Text(value, style: Theme.of(context).textTheme.headlineMedium),
+            ])));
   }
 }
 
 class _TagCard extends StatelessWidget {
-  final String title;
-  final String value;
-  final Color color;
-  final Color onColor;
+  final String title, value;
+  final Color color, onColor;
   final IconData icon;
   const _TagCard(
       {required this.title,
@@ -228,33 +207,27 @@ class _TagCard extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Card(
-      color: color,
-      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
-      child: Padding(
-        padding: const EdgeInsets.all(16),
-        child: Row(
-          children: [
-            Icon(icon, color: onColor),
-            const SizedBox(width: 10),
-            Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(title, style: TextStyle(color: onColor)),
-                  const SizedBox(height: 4),
-                  Text(value,
-                      style: Theme.of(context)
-                          .textTheme
-                          .headlineSmall
-                          ?.copyWith(
-                              color: onColor, fontWeight: FontWeight.w700)),
-                ],
-              ),
-            ),
-          ],
-        ),
-      ),
-    );
+        color: color,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+        child: Padding(
+            padding: const EdgeInsets.all(16),
+            child: Row(children: [
+              Icon(icon, color: onColor),
+              const SizedBox(width: 10),
+              Expanded(
+                  child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                    Text(title, style: TextStyle(color: onColor)),
+                    const SizedBox(height: 4),
+                    Text(value,
+                        style: Theme.of(context)
+                            .textTheme
+                            .headlineSmall
+                            ?.copyWith(
+                                color: onColor, fontWeight: FontWeight.w700)),
+                  ]))
+            ])));
   }
 }
 
@@ -266,24 +239,19 @@ class _MenuPill extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Material(
-      color: Theme.of(context).colorScheme.surface,
-      borderRadius: BorderRadius.circular(30),
-      child: InkWell(
+        color: Theme.of(context).colorScheme.surface,
         borderRadius: BorderRadius.circular(30),
-        onTap: onTap,
-        child: Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 16),
-          child: Row(
-            mainAxisAlignment: MainAxisAlignment.center,
-            children: [
-              Icon(icon, size: 20),
-              const SizedBox(width: 8),
-              Text(label),
-            ],
-          ),
-        ),
-      ),
-    );
+        child: InkWell(
+            borderRadius: BorderRadius.circular(30),
+            onTap: onTap,
+            child: Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 16),
+                child:
+                    Row(mainAxisAlignment: MainAxisAlignment.center, children: [
+                  Icon(icon, size: 20),
+                  const SizedBox(width: 8),
+                  Text(label),
+                ]))));
   }
 }
 
@@ -294,40 +262,32 @@ class _StockCard extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Card(
-      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
-      child: Padding(
-        padding: const EdgeInsets.fromLTRB(16, 16, 16, 12),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            const Text('Saldo em estoque'),
-            const SizedBox(height: 4),
-            Text(totalText, style: Theme.of(context).textTheme.titleMedium),
-            const SizedBox(height: 12),
-            SizedBox(
-              width: double.infinity,
-              child: FilledButton(
-                style: FilledButton.styleFrom(
-                  backgroundColor: Colors.tealAccent.shade400,
-                  foregroundColor: Colors.black87,
-                  shape: RoundedRectangleBorder(
-                      borderRadius: BorderRadius.circular(28)),
-                  padding: const EdgeInsets.symmetric(vertical: 14),
-                ),
-                onPressed: onConsultar,
-                child: const Row(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    Icon(Icons.inventory_2_rounded),
-                    SizedBox(width: 8),
-                    Text('Consultar estoque'),
-                  ],
-                ),
-              ),
-            ),
-          ],
-        ),
-      ),
-    );
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+        child: Padding(
+            padding: const EdgeInsets.fromLTRB(16, 16, 16, 12),
+            child:
+                Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+              const Text('Saldo em estoque'),
+              const SizedBox(height: 4),
+              Text(totalText, style: Theme.of(context).textTheme.titleMedium),
+              const SizedBox(height: 12),
+              SizedBox(
+                  width: double.infinity,
+                  child: FilledButton(
+                      style: FilledButton.styleFrom(
+                          backgroundColor: Colors.tealAccent.shade400,
+                          foregroundColor: Colors.black87,
+                          shape: RoundedRectangleBorder(
+                              borderRadius: BorderRadius.circular(28)),
+                          padding: const EdgeInsets.symmetric(vertical: 14)),
+                      onPressed: onConsultar,
+                      child: const Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Icon(Icons.inventory_2_rounded),
+                            SizedBox(width: 8),
+                            Text('Consultar estoque')
+                          ])))
+            ])));
   }
 }

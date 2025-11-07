@@ -97,7 +97,7 @@ class _ChatPageState extends State<ChatPage> {
 
     if (!mounted) return;
     setState(() {
-      _msgs.add(_Msg(false, res.reply));
+      _msgs.add(_Msg(false, res.message));
       _sending = false;
     });
     _scrollToEnd();
