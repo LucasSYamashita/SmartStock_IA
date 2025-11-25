@@ -1,10 +1,8 @@
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
-import '../../data/datasources/firestore_movements.dart';
 import '../tenant/tenant_provider.dart';
 
 class ManualEntryPage extends ConsumerStatefulWidget {
@@ -15,145 +13,314 @@ class ManualEntryPage extends ConsumerStatefulWidget {
 }
 
 class _ManualEntryPageState extends ConsumerState<ManualEntryPage> {
-  final _prodIdCtrl = TextEditingController(); // pode ficar vazio (gera ID)
-  final _qtyCtrl = TextEditingController();
-  final _costCtrl = TextEditingController();
-  final _reasonCtrl = TextEditingController(text: 'compra');
+  final _idCtrl = TextEditingController(); // pode ficar vazio (gera id)
+  final _qtdCtrl = TextEditingController(text: '1');
+  final _custoCtrl = TextEditingController(text: '0');
+  final _motivoCtrl = TextEditingController(text: 'compra');
 
-  bool _saving = false;
+  bool _busy = false;
+  String? _err;
 
   @override
   void dispose() {
-    _prodIdCtrl.dispose();
-    _qtyCtrl.dispose();
-    _costCtrl.dispose();
-    _reasonCtrl.dispose();
+    _idCtrl.dispose();
+    _qtdCtrl.dispose();
+    _custoCtrl.dispose();
+    _motivoCtrl.dispose();
     super.dispose();
   }
 
-  void _toast(String msg) {
-    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(msg)));
+  double _parseDouble(String raw) {
+    final s = raw
+        .trim()
+        .replaceAll('R\$', '')
+        .replaceAll(' ', '')
+        .replaceAll(',', '.');
+    return double.tryParse(s) ?? 0.0;
   }
 
   Future<void> _save() async {
-    if (_saving) return;
-    setState(() => _saving = true);
-
     final tenantId = ref.read(tenantIdProvider);
-    if (tenantId == null) {
-      _toast('Loja não selecionada.');
-      setState(() => _saving = false);
+    if (tenantId == null || tenantId.isEmpty) {
+      setState(() => _err = 'Selecione/abra uma loja.');
+      return;
+    }
+    final uid = FirebaseAuth.instance.currentUser?.uid;
+    if (uid == null) {
+      setState(() => _err = 'Faça login para registrar entrada.');
       return;
     }
 
-    final qty = int.tryParse(_qtyCtrl.text.trim());
-    final custo = double.tryParse(_costCtrl.text.trim().replaceAll(',', '.'));
-    final motivo = _reasonCtrl.text.trim();
+    final qtd = int.tryParse(_qtdCtrl.text.trim()) ?? 0;
+    final custo = _parseDouble(_custoCtrl.text);
+    var prodId = _idCtrl.text.trim();
+    final motivo = _motivoCtrl.text.trim();
 
-    if (qty == null || qty <= 0) {
-      _toast('Quantidade inválida (inteiro > 0).');
-      setState(() => _saving = false);
-      return;
-    }
-    if (_costCtrl.text.trim().isNotEmpty && custo == null) {
-      _toast('Custo unitário inválido.');
-      setState(() => _saving = false);
+    if (qtd <= 0) {
+      setState(() => _err = 'Quantidade deve ser maior que zero.');
       return;
     }
 
-    final db = FirebaseFirestore.instance;
-    final uid = FirebaseAuth.instance.currentUser!.uid;
+    setState(() {
+      _busy = true;
+      _err = null;
+    });
 
     try {
-      // 1) garantir que o produto exista (ou criá-lo)
-      final produtoId = await _ensureProductExistsOrCreate(
-        tenantId: tenantId,
-        providedId: _prodIdCtrl.text.trim(),
-        precoSugerido: custo ?? 0.0,
-        uid: uid,
-      );
-      if (produtoId == null) {
-        // usuário cancelou o diálogo de criação
-        setState(() => _saving = false);
-        return;
+      final db = FirebaseFirestore.instance;
+      final prods =
+          db.collection('tenants').doc(tenantId).collection('produtos');
+      final movs =
+          db.collection('tenants').doc(tenantId).collection('movimentos');
+
+      // 1) Garante um ID de produto
+      DocumentReference<Map<String, dynamic>> prodRef;
+      DocumentSnapshot<Map<String, dynamic>> prodSnap;
+
+      if (prodId.isEmpty) {
+        // se não veio id, gera um doc novo
+        prodRef = prods.doc();
+        prodId = prodRef.id;
+        prodSnap = await prodRef.get();
+      } else {
+        prodRef = prods.doc(prodId);
+        prodSnap = await prodRef.get();
       }
 
-      // 2) registra ENTRADA
-      final mov = FirestoreMovements(db, tenantId);
-      await mov.applyMovement(
-        produtoId: produtoId,
-        tipo: 'entrada',
-        quantidade: qty,
-        usuarioId: uid,
-        motivo: motivo.isEmpty ? null : motivo,
-        origem: 'entrada_manual',
-        mensagemOriginal: 'Entrada manual • ${qty}×',
-        preco: custo, // opcional no log
-      );
+      // 2) Se o produto não existe, abre diálogo padronizado para criá-lo
+      if (!prodSnap.exists) {
+        final created = await _showCreateProductDialog(
+          context: context,
+          tenantId: tenantId,
+          uid: uid,
+          prodRef: prodRef,
+          precoSugerido: custo,
+        );
 
-      _toast('Entrada registrada com sucesso.');
-      if (mounted) Navigator.pop(context);
+        if (!created) {
+          // usuário cancelou ou deu erro
+          if (mounted) {
+            setState(() => _busy = false);
+          }
+          return;
+        }
+        // após criar, recarrega o snapshot
+        prodSnap = await prodRef.get();
+      }
+
+      // 3) Agora o produto existe; registra a entrada + atualiza estoque
+      await db.runTransaction((tx) async {
+        final snap = await tx.get(prodRef);
+        final data = snap.data() ?? {};
+
+        final nome = (data['nome'] as String?) ?? prodId;
+        final atual = (data['quantidade'] as int?) ?? 0;
+
+        final novoEstoque = atual + qtd;
+
+        final precoVenda = (data['preco'] as num?)?.toDouble() ??
+            (data['precoVenda'] as num?)?.toDouble() ??
+            custo;
+
+        // Atualiza produto
+        tx.update(prodRef, {
+          'quantidade': novoEstoque,
+          'preco': precoVenda,
+          'precoVenda': precoVenda,
+          'updatedAt': FieldValue.serverTimestamp(),
+          'updatedBy': uid,
+        });
+
+        // Registra o movimento
+        final movRef = movs.doc();
+        tx.set(movRef, {
+          'tipo': 'entrada',
+          'quantidade': qtd,
+          'produtoId': prodRef.id,
+          'produtoNome': nome,
+          'usuarioId': uid,
+          'preco': custo, // custo unitário informado aqui
+          'valorTotal': custo * qtd,
+          'motivo': motivo.isEmpty ? 'entrada manual' : motivo,
+          'origem': 'manual',
+          'createdAt': FieldValue.serverTimestamp(),
+        });
+      });
+
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Entrada registrada com sucesso.')),
+      );
+      Navigator.pop(context);
     } on FirebaseException catch (e) {
-      _toast('${e.code}: ${e.message}');
-    } on StateError catch (e) {
-      _toast(e.message ?? 'Erro');
+      setState(() => _err = '[${e.code}] ${e.message}');
     } catch (e) {
-      _toast(e.toString());
+      setState(() => _err = e.toString());
     } finally {
-      if (mounted) setState(() => _saving = false);
+      if (mounted) setState(() => _busy = false);
     }
   }
 
-  /// Garante existência do produto. Se não existir (ou se ID não fornecido), abre diálogo
-  /// para criar com os campos mínimos exigidos pelas RULES.
-  Future<String?> _ensureProductExistsOrCreate({
+  /// Diálogo padronizado para criar produto quando não existe.
+  Future<bool> _showCreateProductDialog({
+    required BuildContext context,
     required String tenantId,
     required String uid,
-    String? providedId,
-    required double precoSugerido,
+    required DocumentReference<Map<String, dynamic>> prodRef,
+    double? precoSugerido,
   }) async {
-    final db = FirebaseFirestore.instance;
-    final col = db.collection('tenants').doc(tenantId).collection('produtos');
+    final nomeCtrl = TextEditingController();
+    final precoCtrl =
+        TextEditingController(text: (precoSugerido ?? 0).toStringAsFixed(2));
+    final minCtrl = TextEditingController(text: '0');
+    final categoriaCtrl = TextEditingController();
+    final skuCtrl = TextEditingController();
 
-    // Se veio um ID, tenta achar
-    if (providedId != null && providedId.isNotEmpty) {
-      final ref = col.doc(providedId);
-      final snap = await ref.get();
-      if (snap.exists) return ref.id;
+    String? err;
+    bool saving = false;
+    bool created = false;
 
-      // Não existe -> perguntar dados mínimos e criar com ESTE ID
-      final data = await showDialog<_NewProductData>(
-        context: context,
-        builder: (_) => _NewProductDialog(
-          suggestedName: '',
-          suggestedPrice: precoSugerido,
-          allowCustomId: false, // já temos o ID informado
-          fixedId: providedId,
-        ),
-      );
-      if (data == null) return null;
-
-      await ref.set(data.toMap(uid));
-      return ref.id;
-    }
-
-    // Sem ID -> cria com ID automático
-    final data = await showDialog<_NewProductData>(
+    await showDialog(
       context: context,
-      builder: (_) => _NewProductDialog(
-        suggestedName: '',
-        suggestedPrice: precoSugerido,
-        allowCustomId: true,
-      ),
-    );
-    if (data == null) return null;
+      barrierDismissible: !saving,
+      builder: (ctx) {
+        return StatefulBuilder(
+          builder: (ctx, setLocal) {
+            Future<void> save() async {
+              if (saving) return;
+              setLocal(() {
+                err = null;
+                saving = true;
+              });
 
-    final ref =
-        data.customId?.isNotEmpty == true ? col.doc(data.customId) : col.doc();
-    await ref.set(data.toMap(uid));
-    // coloca o ID gerado no campo, pra facilitar entradas futuras
-    _prodIdCtrl.text = ref.id;
-    return ref.id;
+              final nome = nomeCtrl.text.trim();
+              final min = int.tryParse(minCtrl.text.trim()) ?? 0;
+              final preco = _parseDouble(precoCtrl.text);
+
+              if (nome.isEmpty) {
+                setLocal(() {
+                  err = 'Informe o nome do produto.';
+                  saving = false;
+                });
+                return;
+              }
+
+              try {
+                final data = <String, dynamic>{
+                  'nome': nome,
+                  'nomeLower': nome.toLowerCase(),
+                  'categoria': categoriaCtrl.text.trim(),
+                  'sku': skuCtrl.text.trim(),
+                  'preco': preco,
+                  'precoVenda': preco,
+                  'quantidade': 0,
+                  'estoqueMinimo': min,
+                  'ativo': true,
+                  'createdAt': FieldValue.serverTimestamp(),
+                  'createdBy': uid,
+                  'updatedAt': FieldValue.serverTimestamp(),
+                  'updatedBy': uid,
+                };
+
+                await prodRef.set(data);
+
+                created = true;
+                if (!context.mounted) return;
+                Navigator.pop(context);
+              } on FirebaseException catch (e) {
+                setLocal(() {
+                  err = '${e.code}: ${e.message}';
+                  saving = false;
+                });
+              } catch (e) {
+                setLocal(() {
+                  err = e.toString();
+                  saving = false;
+                });
+              }
+            }
+
+            return AlertDialog(
+              shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(24),
+              ),
+              title: Text('Criar produto\nID: ${prodRef.id}',
+                  style: Theme.of(context).textTheme.titleMedium),
+              content: SizedBox(
+                width: 420,
+                child: SingleChildScrollView(
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      TextField(
+                        controller: nomeCtrl,
+                        decoration: const InputDecoration(
+                          labelText: 'Nome *',
+                        ),
+                      ),
+                      const SizedBox(height: 12),
+                      TextField(
+                        controller: precoCtrl,
+                        decoration: const InputDecoration(
+                          labelText: 'Preço de venda *',
+                        ),
+                        keyboardType: const TextInputType.numberWithOptions(
+                          decimal: true,
+                        ),
+                      ),
+                      const SizedBox(height: 12),
+                      TextField(
+                        controller: minCtrl,
+                        decoration: const InputDecoration(
+                          labelText: 'Estoque mínimo',
+                        ),
+                        keyboardType: TextInputType.number,
+                      ),
+                      const SizedBox(height: 12),
+                      TextField(
+                        controller: categoriaCtrl,
+                        decoration: const InputDecoration(
+                          labelText: 'Categoria (opcional)',
+                        ),
+                      ),
+                      const SizedBox(height: 12),
+                      TextField(
+                        controller: skuCtrl,
+                        decoration: const InputDecoration(
+                          labelText: 'SKU (opcional)',
+                        ),
+                      ),
+                      if (err != null) ...[
+                        const SizedBox(height: 8),
+                        Align(
+                          alignment: Alignment.centerLeft,
+                          child: Text(
+                            err!,
+                            style: const TextStyle(color: Colors.red),
+                          ),
+                        ),
+                      ],
+                    ],
+                  ),
+                ),
+              ),
+              actions: [
+                TextButton(
+                  onPressed: saving ? null : () => Navigator.pop(context),
+                  child: const Text('Cancelar'),
+                ),
+                FilledButton(
+                  onPressed: saving ? null : save,
+                  child: Text(saving ? 'Criando...' : 'Criar'),
+                ),
+              ],
+            );
+          },
+        );
+      },
+    );
+
+    return created;
   }
 
   @override
@@ -164,212 +331,53 @@ class _ManualEntryPageState extends ConsumerState<ManualEntryPage> {
         padding: const EdgeInsets.all(16),
         children: [
           TextField(
-            controller: _prodIdCtrl,
+            controller: _idCtrl,
             decoration: const InputDecoration(
               labelText: 'ID do produto (documentId) – opcional',
-              helperText: 'Deixe vazio para criar com ID automático',
+              hintText: 'Deixe vazio para criar com ID automático',
+              prefixIcon: Icon(Icons.tag),
             ),
           ),
           const SizedBox(height: 12),
           TextField(
-            controller: _qtyCtrl,
-            keyboardType: const TextInputType.numberWithOptions(
-                signed: false, decimal: false),
-            inputFormatters: [FilteringTextInputFormatter.digitsOnly],
-            decoration: const InputDecoration(labelText: 'Quantidade (+)'),
+            controller: _qtdCtrl,
+            keyboardType: TextInputType.number,
+            decoration: const InputDecoration(
+              labelText: 'Quantidade (+)',
+              prefixIcon: Icon(Icons.add),
+            ),
           ),
           const SizedBox(height: 12),
           TextField(
-            controller: _costCtrl,
+            controller: _custoCtrl,
             keyboardType: const TextInputType.numberWithOptions(decimal: true),
             decoration: const InputDecoration(
               labelText: 'Custo unitário (opcional)',
-              helperText: 'Se informado, uso como preço sugerido do produto',
+              hintText: 'Ex.: 12,34',
+              prefixIcon: Icon(Icons.attach_money),
             ),
           ),
           const SizedBox(height: 12),
           TextField(
-            controller: _reasonCtrl,
-            decoration: const InputDecoration(labelText: 'Motivo'),
-          ),
-          const SizedBox(height: 20),
-          SizedBox(
-            width: double.infinity,
-            child: FilledButton(
-              onPressed: _saving ? null : _save,
-              child: Text(_saving ? 'Salvando...' : 'Salvar'),
+            controller: _motivoCtrl,
+            decoration: const InputDecoration(
+              labelText: 'Motivo',
+              prefixIcon: Icon(Icons.info_outline),
             ),
+          ),
+          const SizedBox(height: 16),
+          if (_err != null)
+            Text(
+              _err!,
+              style: const TextStyle(color: Colors.red),
+            ),
+          const SizedBox(height: 8),
+          FilledButton(
+            onPressed: _busy ? null : _save,
+            child: Text(_busy ? 'Salvando...' : 'Salvar'),
           ),
         ],
       ),
-    );
-  }
-}
-
-/// Dados mínimos para criar um produto
-class _NewProductData {
-  final String nome;
-  final double preco;
-  final int estoqueMinimo;
-  final String? categoria;
-  final String? sku;
-  final String? customId;
-
-  _NewProductData({
-    required this.nome,
-    required this.preco,
-    required this.estoqueMinimo,
-    this.categoria,
-    this.sku,
-    this.customId,
-  });
-
-  Map<String, dynamic> toMap(String uid) {
-    final map = <String, dynamic>{
-      'nome': nome,
-      'nomeLower': nome.toLowerCase(),
-      'precoVenda': preco, // garante "algum preço" nas RULES
-      'quantidade': 0, // saldo inicial; a entrada somará depois
-      'estoqueMinimo': estoqueMinimo,
-      'ativo': true,
-      'createdAt': FieldValue.serverTimestamp(),
-      'updatedAt': FieldValue.serverTimestamp(),
-      'createdBy': uid,
-      'updatedBy': uid,
-    };
-    if ((categoria ?? '').trim().isNotEmpty)
-      map['categoria'] = categoria!.trim();
-    if ((sku ?? '').trim().isNotEmpty) map['sku'] = sku!.trim();
-    return map;
-  }
-}
-
-/// Diálogo para capturar dados mínimos do novo produto
-class _NewProductDialog extends StatefulWidget {
-  final String suggestedName;
-  final double suggestedPrice;
-  final bool allowCustomId;
-  final String? fixedId;
-
-  const _NewProductDialog({
-    required this.suggestedName,
-    required this.suggestedPrice,
-    required this.allowCustomId,
-    this.fixedId,
-  });
-
-  @override
-  State<_NewProductDialog> createState() => _NewProductDialogState();
-}
-
-class _NewProductDialogState extends State<_NewProductDialog> {
-  final _nome = TextEditingController();
-  final _preco = TextEditingController();
-  final _min = TextEditingController(text: '0');
-  final _cat = TextEditingController();
-  final _sku = TextEditingController();
-  final _id = TextEditingController(); // opcional
-
-  @override
-  void initState() {
-    super.initState();
-    _nome.text = widget.suggestedName;
-    _preco.text = widget.suggestedPrice.toStringAsFixed(2);
-  }
-
-  @override
-  void dispose() {
-    _nome.dispose();
-    _preco.dispose();
-    _min.dispose();
-    _cat.dispose();
-    _sku.dispose();
-    _id.dispose();
-    super.dispose();
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return AlertDialog(
-      title: const Text('Criar produto'),
-      content: SingleChildScrollView(
-        child: Column(
-          children: [
-            if (widget.allowCustomId)
-              TextField(
-                controller: _id,
-                decoration: const InputDecoration(
-                  labelText: 'ID do produto (opcional)',
-                  helperText: 'Deixe vazio para ID automático',
-                ),
-              )
-            else if (widget.fixedId != null)
-              Align(
-                alignment: Alignment.centerLeft,
-                child: Text('ID: ${widget.fixedId}',
-                    style: const TextStyle(fontSize: 12)),
-              ),
-            const SizedBox(height: 8),
-            TextField(
-              controller: _nome,
-              decoration: const InputDecoration(labelText: 'Nome *'),
-            ),
-            const SizedBox(height: 8),
-            TextField(
-              controller: _preco,
-              keyboardType:
-                  const TextInputType.numberWithOptions(decimal: true),
-              decoration: const InputDecoration(labelText: 'Preço de venda *'),
-            ),
-            const SizedBox(height: 8),
-            TextField(
-              controller: _min,
-              keyboardType: const TextInputType.numberWithOptions(
-                  signed: false, decimal: false),
-              inputFormatters: [FilteringTextInputFormatter.digitsOnly],
-              decoration: const InputDecoration(labelText: 'Estoque mínimo'),
-            ),
-            const SizedBox(height: 8),
-            TextField(
-              controller: _cat,
-              decoration:
-                  const InputDecoration(labelText: 'Categoria (opcional)'),
-            ),
-            const SizedBox(height: 8),
-            TextField(
-              controller: _sku,
-              decoration: const InputDecoration(labelText: 'SKU (opcional)'),
-            ),
-          ],
-        ),
-      ),
-      actions: [
-        TextButton(
-            onPressed: () => Navigator.pop(context),
-            child: const Text('Cancelar')),
-        FilledButton(
-          onPressed: () {
-            final nome = _nome.text.trim();
-            final preco =
-                double.tryParse(_preco.text.trim().replaceAll(',', '.')) ?? -1;
-            final minimo = int.tryParse(_min.text.trim()) ?? 0;
-            if (nome.isEmpty || preco < 0) return;
-
-            Navigator.pop(
-              context,
-              _NewProductData(
-                nome: nome,
-                preco: preco,
-                estoqueMinimo: minimo,
-                categoria: _cat.text.trim().isEmpty ? null : _cat.text.trim(),
-                sku: _sku.text.trim().isEmpty ? null : _sku.text.trim(),
-                customId: _id.text.trim().isEmpty ? null : _id.text.trim(),
-              ),
-            );
-          },
-          child: const Text('Criar'),
-        ),
-      ],
     );
   }
 }

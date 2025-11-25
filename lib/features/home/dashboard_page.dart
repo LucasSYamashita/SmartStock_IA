@@ -16,28 +16,33 @@ class DashboardPage extends ConsumerWidget {
     final tenantId = ref.watch(tenantIdProvider);
     if (tenantId == null) {
       return const Center(
-          child: Padding(
-              padding: EdgeInsets.all(24),
-              child: Text(
-                  'Nenhuma loja selecionada. Crie/entre em uma loja no Perfil.')));
+        child: Padding(
+          padding: EdgeInsets.all(24),
+          child: Text(
+            'Nenhuma loja selecionada. Crie/entre em uma loja no Perfil.',
+          ),
+        ),
+      );
     }
 
     final now = DateTime.now();
     final firstOfMonth = DateTime(now.year, now.month, 1);
 
+    // Produtos para cards de estoque
+    final produtosStream = FirebaseFirestore.instance
+        .collection('tenants')
+        .doc(tenantId)
+        .collection('produtos')
+        .snapshots();
+
+    // Movimentos (saídas) – vamos filtrar o mês atual no Dart
     final vendasMesStream = FirebaseFirestore.instance
         .collection('tenants')
         .doc(tenantId)
         .collection('movimentos')
         .where('tipo', isEqualTo: 'saida')
-        .where('createdAt',
-            isGreaterThanOrEqualTo: Timestamp.fromDate(firstOfMonth))
-        .snapshots();
-
-    final produtosStream = FirebaseFirestore.instance
-        .collection('tenants')
-        .doc(tenantId)
-        .collection('produtos')
+        .orderBy('createdAt', descending: true)
+        .limit(500)
         .snapshots();
 
     return StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
@@ -56,9 +61,11 @@ class DashboardPage extends ConsumerWidget {
             final v = (m['preco'] ?? 0) as num;
             final min = (m['estoqueMinimo'] ?? 0) as num;
             saldoEstoque += q * v;
-            if (q <= 0)
+            if (q <= 0) {
               semEstoque++;
-            else if (q <= min) baixo++;
+            } else if (q <= min) {
+              baixo++;
+            }
           }
         }
 
@@ -66,13 +73,33 @@ class DashboardPage extends ConsumerWidget {
           stream: vendasMesStream,
           builder: (context, venSnap) {
             num vendasDoMes = 0;
+
             if (venSnap.hasData) {
               for (final d in venSnap.data!.docs) {
-                final any = d.data()['valorTotal'] ?? 0;
-                final v = any is num
-                    ? any.toDouble()
-                    : double.tryParse('$any') ?? 0.0;
-                vendasDoMes += v;
+                final m = d.data();
+
+                // garante que é do mês atual
+                final ts = m['createdAt'];
+                if (ts is! Timestamp) continue;
+                final dt = ts.toDate();
+                if (dt.year != firstOfMonth.year ||
+                    dt.month != firstOfMonth.month) {
+                  continue;
+                }
+
+                final qtd = (m['quantidade'] ?? 0) as num;
+
+                final valorTotalLegacy = (m['valorTotal'] as num?)?.toDouble();
+                final totalValue = (m['totalValue'] as num?)?.toDouble();
+                final unitPrice = (m['unitPrice'] as num?)?.toDouble();
+                final preco = (m['preco'] as num?)?.toDouble();
+
+                // mesmo cálculo do histórico/CSV
+                final linha = valorTotalLegacy ??
+                    totalValue ??
+                    ((unitPrice ?? preco ?? 0.0) * qtd);
+
+                vendasDoMes += linha;
               }
             }
 
@@ -82,38 +109,43 @@ class DashboardPage extends ConsumerWidget {
                 Row(
                   children: [
                     Expanded(
-                        child: _BigStatCard(
-                            title: 'Vendas do mês',
-                            value: _fmtCurrency(vendasDoMes))),
+                      child: _BigStatCard(
+                        title: 'Vendas do mês',
+                        value: _fmtCurrency(vendasDoMes),
+                      ),
+                    ),
                     const SizedBox(width: 12),
                     Expanded(
-                        child: _BigStatCard(
-                            title: 'Produtos', value: '$totalProdutos')),
+                      child: _BigStatCard(
+                        title: 'Produtos',
+                        value: '$totalProdutos',
+                      ),
+                    ),
                   ],
                 ),
                 const SizedBox(height: 12),
                 Row(
                   children: [
                     Expanded(
-                        child: _TagCard(
-                            title: 'Sem estoque',
-                            value: '$semEstoque',
-                            color: Theme.of(context).colorScheme.errorContainer,
-                            onColor:
-                                Theme.of(context).colorScheme.onErrorContainer,
-                            icon: Icons.block)),
+                      child: _TagCard(
+                        title: 'Sem estoque',
+                        value: '$semEstoque',
+                        color: Theme.of(context).colorScheme.errorContainer,
+                        onColor: Theme.of(context).colorScheme.onErrorContainer,
+                        icon: Icons.block,
+                      ),
+                    ),
                     const SizedBox(width: 12),
                     Expanded(
-                        child: _TagCard(
-                            title: 'Estoque baixo',
-                            value: '$baixo',
-                            color: Theme.of(context)
-                                .colorScheme
-                                .secondaryContainer,
-                            onColor: Theme.of(context)
-                                .colorScheme
-                                .onSecondaryContainer,
-                            icon: Icons.warning_amber)),
+                      child: _TagCard(
+                        title: 'Estoque baixo',
+                        value: '$baixo',
+                        color: Theme.of(context).colorScheme.secondaryContainer,
+                        onColor:
+                            Theme.of(context).colorScheme.onSecondaryContainer,
+                        icon: Icons.warning_amber,
+                      ),
+                    ),
                   ],
                 ),
                 const SizedBox(height: 16),
@@ -126,43 +158,51 @@ class DashboardPage extends ConsumerWidget {
                   childAspectRatio: 2.6,
                   children: [
                     _MenuPill(
-                        icon: Icons.point_of_sale,
-                        label: 'Vender',
-                        onTap: () => Navigator.push(
-                            context,
-                            MaterialPageRoute(
-                                builder: (_) =>
-                                    const ManualSaleCatalogPage()))),
+                      icon: Icons.point_of_sale,
+                      label: 'Vender',
+                      onTap: () => Navigator.push(
+                        context,
+                        MaterialPageRoute(
+                          builder: (_) => const ManualSaleCatalogPage(),
+                        ),
+                      ),
+                    ),
                     _MenuPill(
                       icon: Icons.receipt_long,
                       label: 'Relatórios',
                       onTap: () => Navigator.of(context).push(
                         MaterialPageRoute(
-                          builder: (_) =>
-                              const MovementHistoryPage(), // usa o novo arquivo
+                          builder: (_) => const MovementHistoryPage(),
                         ),
                       ),
                     ),
                     _MenuPill(
-                        icon: Icons.inventory_rounded,
-                        label: 'Entrada manual',
-                        onTap: () => Navigator.push(
-                            context,
-                            MaterialPageRoute(
-                                builder: (_) => const ManualEntryPage()))),
+                      icon: Icons.inventory_rounded,
+                      label: 'Entrada manual',
+                      onTap: () => Navigator.push(
+                        context,
+                        MaterialPageRoute(
+                          builder: (_) => const ManualEntryPage(),
+                        ),
+                      ),
+                    ),
                     _MenuPill(
-                        icon: Icons.settings_outlined,
-                        label: 'Configurações',
-                        onTap: () => Navigator.push(
-                            context,
-                            MaterialPageRoute(
-                                builder: (_) => const ProfilePage()))),
+                      icon: Icons.settings_outlined,
+                      label: 'Configurações',
+                      onTap: () => Navigator.push(
+                        context,
+                        MaterialPageRoute(
+                          builder: (_) => const ProfilePage(),
+                        ),
+                      ),
+                    ),
                   ],
                 ),
                 const SizedBox(height: 16),
                 _StockCard(
-                    totalText: _fmtCurrency(saldoEstoque),
-                    onConsultar: onConsultarEstoque),
+                  totalText: _fmtCurrency(saldoEstoque),
+                  onConsultar: onConsultarEstoque,
+                ),
               ],
             );
           },
@@ -182,15 +222,19 @@ class _BigStatCard extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Card(
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
-        child: Padding(
-            padding: const EdgeInsets.all(16),
-            child:
-                Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-              Text(title),
-              const SizedBox(height: 8),
-              Text(value, style: Theme.of(context).textTheme.headlineMedium),
-            ])));
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(title),
+            const SizedBox(height: 8),
+            Text(value, style: Theme.of(context).textTheme.headlineMedium),
+          ],
+        ),
+      ),
+    );
   }
 }
 
@@ -198,36 +242,44 @@ class _TagCard extends StatelessWidget {
   final String title, value;
   final Color color, onColor;
   final IconData icon;
-  const _TagCard(
-      {required this.title,
-      required this.value,
-      required this.color,
-      required this.onColor,
-      required this.icon});
+  const _TagCard({
+    required this.title,
+    required this.value,
+    required this.color,
+    required this.onColor,
+    required this.icon,
+  });
   @override
   Widget build(BuildContext context) {
     return Card(
-        color: color,
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
-        child: Padding(
-            padding: const EdgeInsets.all(16),
-            child: Row(children: [
-              Icon(icon, color: onColor),
-              const SizedBox(width: 10),
-              Expanded(
-                  child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                    Text(title, style: TextStyle(color: onColor)),
-                    const SizedBox(height: 4),
-                    Text(value,
-                        style: Theme.of(context)
-                            .textTheme
-                            .headlineSmall
-                            ?.copyWith(
-                                color: onColor, fontWeight: FontWeight.w700)),
-                  ]))
-            ])));
+      color: color,
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Row(
+          children: [
+            Icon(icon, color: onColor),
+            const SizedBox(width: 10),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(title, style: TextStyle(color: onColor)),
+                  const SizedBox(height: 4),
+                  Text(
+                    value,
+                    style: Theme.of(context).textTheme.headlineSmall?.copyWith(
+                          color: onColor,
+                          fontWeight: FontWeight.w700,
+                        ),
+                  ),
+                ],
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
   }
 }
 
@@ -239,19 +291,24 @@ class _MenuPill extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Material(
-        color: Theme.of(context).colorScheme.surface,
+      color: Theme.of(context).colorScheme.surface,
+      borderRadius: BorderRadius.circular(30),
+      child: InkWell(
         borderRadius: BorderRadius.circular(30),
-        child: InkWell(
-            borderRadius: BorderRadius.circular(30),
-            onTap: onTap,
-            child: Padding(
-                padding: const EdgeInsets.symmetric(horizontal: 16),
-                child:
-                    Row(mainAxisAlignment: MainAxisAlignment.center, children: [
-                  Icon(icon, size: 20),
-                  const SizedBox(width: 8),
-                  Text(label),
-                ]))));
+        onTap: onTap,
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 16),
+          child: Row(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              Icon(icon, size: 20),
+              const SizedBox(width: 8),
+              Text(label),
+            ],
+          ),
+        ),
+      ),
+    );
   }
 }
 
@@ -262,32 +319,41 @@ class _StockCard extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Card(
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
-        child: Padding(
-            padding: const EdgeInsets.fromLTRB(16, 16, 16, 12),
-            child:
-                Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-              const Text('Saldo em estoque'),
-              const SizedBox(height: 4),
-              Text(totalText, style: Theme.of(context).textTheme.titleMedium),
-              const SizedBox(height: 12),
-              SizedBox(
-                  width: double.infinity,
-                  child: FilledButton(
-                      style: FilledButton.styleFrom(
-                          backgroundColor: Colors.tealAccent.shade400,
-                          foregroundColor: Colors.black87,
-                          shape: RoundedRectangleBorder(
-                              borderRadius: BorderRadius.circular(28)),
-                          padding: const EdgeInsets.symmetric(vertical: 14)),
-                      onPressed: onConsultar,
-                      child: const Row(
-                          mainAxisSize: MainAxisSize.min,
-                          children: [
-                            Icon(Icons.inventory_2_rounded),
-                            SizedBox(width: 8),
-                            Text('Consultar estoque')
-                          ])))
-            ])));
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(16, 16, 16, 12),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Text('Saldo em estoque'),
+            const SizedBox(height: 4),
+            Text(totalText, style: Theme.of(context).textTheme.titleMedium),
+            const SizedBox(height: 12),
+            SizedBox(
+              width: double.infinity,
+              child: FilledButton(
+                style: FilledButton.styleFrom(
+                  backgroundColor: Colors.tealAccent.shade400,
+                  foregroundColor: Colors.black87,
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(28),
+                  ),
+                  padding: const EdgeInsets.symmetric(vertical: 14),
+                ),
+                onPressed: onConsultar,
+                child: const Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Icon(Icons.inventory_2_rounded),
+                    SizedBox(width: 8),
+                    Text('Consultar estoque'),
+                  ],
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
   }
 }

@@ -1,12 +1,10 @@
-import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:flutter/material.dart';
 
-// usa o backend que te passei (local por padrão)
 import 'chat_backend.dart';
 
 class ChatPage extends StatefulWidget {
   final String tenantId;
-  final String role; // 'admin' | 'staff' | 'viewer' (mantido p/ compat.)
+  final String role; // 'admin' | 'staff' | 'viewer'
   final String userId;
 
   const ChatPage({
@@ -27,7 +25,9 @@ class _Msg {
 }
 
 class _ChatPageState extends State<ChatPage> {
+  /// Backend único: Cloud Function + fallback local
   late final ChatBackend _backend;
+
   final _input = TextEditingController();
   final _scroll = ScrollController();
   final _msgs = <_Msg>[];
@@ -36,14 +36,21 @@ class _ChatPageState extends State<ChatPage> {
   @override
   void initState() {
     super.initState();
-    // backend local (cai pro local mesmo que vc habilite cloud e falhe)
-    _backend = makeChatBackend(FirebaseFirestore.instance);
 
+    // usa o factory sem parâmetros (internamente ele pega o Firestore.instance)
+    _backend = makeChatBackend();
+
+    // mensagem inicial do assistente
     _msgs.add(_Msg(
-        false,
-        'Oi! Posso ajudar com **consultas**: baixo estoque, buscar itens, etc.\n'
-        'Para **entrada**, abra o produto e toque em “Registrar entrada”.\n'
-        'Para **saída/venda**, use o botão **Vender** na tela Início.'));
+      false,
+      'Oi! Eu sou o assistente do SmartStock. Você pode escrever coisas como:\n'
+      '• "faz uma entrada de 7 coca-cola lata a 4,25"\n'
+      '• "vendi 3 coca lata a 5 reais"\n'
+      '• "quanto tem de arroz?"\n'
+      '• "qual a melhor marca de refrigerante para um mercadinho de bairro?"\n'
+      '• "o que você sugere de produto de limpeza para aumentar a saída?"\n'
+      '• "Não usar multiplas entradas!"\n',
+    ));
   }
 
   @override
@@ -69,44 +76,63 @@ class _ChatPageState extends State<ChatPage> {
     if (raw.isEmpty || _sending) return;
 
     setState(() {
-      _msgs.add(_Msg(true, raw));
+      _msgs.add(_Msg(true, raw)); // mensagem do usuário
       _input.clear();
       _sending = true;
     });
     _scrollToEnd();
 
-    // Respostas diretas para confirmar/cancelar (não há pendência aqui)
-    final t = raw.toLowerCase();
-    if (t == 'confirmar' || t == 'cancelar') {
-      setState(() {
-        _msgs.add(_Msg(
+    try {
+      final t = raw.toLowerCase();
+
+      // respostas diretas de "confirmar/cancelar" (sem pendência no momento)
+      if (t == 'confirmar' || t == 'cancelar') {
+        setState(() {
+          _msgs.add(_Msg(
             false,
-            'Não há movimentação pendente. Para lançar **entrada**, use o produto; '
-            'para **saída/venda**, use **Vender** na tela Início.'));
+            'Não há movimentação pendente. Para lançar **entrada**, '
+            'use o produto; para **saída/venda**, use **Vender** na tela Início.',
+          ));
+          _sending = false;
+        });
+        _scrollToEnd();
+        return;
+      }
+
+      // chama o backend (IA + fallback local)
+      final res = await _backend.respond(
+        tenantId: widget.tenantId,
+        userId: widget.userId,
+        text: raw,
+      );
+
+      if (!mounted) return;
+      setState(() {
+        _msgs.add(_Msg(false, res.message));
         _sending = false;
       });
       _scrollToEnd();
-      return;
+    } catch (e, st) {
+      // ignore: avoid_print
+      print('⚠️ [chat-page] Erro ao enviar mensagem: $e\n$st');
+
+      if (!mounted) return;
+      setState(() {
+        _msgs.add(_Msg(
+          false,
+          'Tive um problema para processar sua mensagem agora. '
+          'Tente novamente em alguns segundos.',
+        ));
+        _sending = false;
+      });
+      _scrollToEnd();
     }
-
-    final res = await _backend.respond(
-      tenantId: widget.tenantId,
-      userId: widget.userId,
-      text: raw,
-    );
-
-    if (!mounted) return;
-    setState(() {
-      _msgs.add(_Msg(false, res.message));
-      _sending = false;
-    });
-    _scrollToEnd();
   }
 
-  // Visual igual ao seu: bolhas verdes com letras brancas
   Color _bubbleBg(bool isUser) => isUser
       ? const Color(0xFF1B5E20).withOpacity(0.90)
       : const Color(0xFF43A047).withOpacity(0.22);
+
   Color _bubbleFg(bool isUser) => Colors.white;
 
   @override
@@ -185,7 +211,7 @@ class _ChatPageState extends State<ChatPage> {
                       textInputAction: TextInputAction.send,
                       decoration: const InputDecoration(
                         hintText:
-                            'Ex.: "baixo estoque", "paracetamol", "total vendido hoje"...',
+                            'Ex.: "faz uma entrada...", "ontem vendi 3 coca...", "quanto tem de arroz"...',
                         border: OutlineInputBorder(),
                         isDense: true,
                       ),
@@ -198,7 +224,8 @@ class _ChatPageState extends State<ChatPage> {
                         ? const SizedBox(
                             height: 18,
                             width: 18,
-                            child: CircularProgressIndicator(strokeWidth: 2))
+                            child: CircularProgressIndicator(strokeWidth: 2),
+                          )
                         : const Icon(Icons.send, size: 18),
                     label: const Text('Enviar'),
                   ),

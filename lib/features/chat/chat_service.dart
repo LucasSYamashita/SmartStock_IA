@@ -1,3 +1,4 @@
+// lib/features/chat/chat_service.dart
 import 'dart:math';
 import 'package:cloud_functions/cloud_functions.dart';
 
@@ -12,11 +13,9 @@ class ActReply {
 class ChatService {
   final FirebaseFunctions _fx;
 
-  ChatService(
-      {FirebaseFunctions? functions, String region = 'southamerica-east1'})
+  ChatService({FirebaseFunctions? functions, String region = 'us-central1'})
       : _fx = (functions ?? FirebaseFunctions.instanceFor(region: region));
 
-  /// Chama a callable `actCall` com o payload esperado.
   Future<ActReply> send({
     required String tenantId,
     required String role,
@@ -40,7 +39,6 @@ class ChatService {
   }
 }
 
-/// ID robusto p/ correlacionar requisição/resposta
 String _makeRequestId() {
   const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
   final rnd = Random.secure();

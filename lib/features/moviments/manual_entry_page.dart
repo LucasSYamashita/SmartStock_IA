@@ -14,7 +14,6 @@ class ManualEntryPage extends ConsumerStatefulWidget {
 
 class _ManualEntryPageState extends ConsumerState<ManualEntryPage> {
   final _idCtrl = TextEditingController(); // pode ficar vazio (gera id)
-  final _nameCtrl = TextEditingController(); // usado se produto novo
   final _qtdCtrl = TextEditingController(text: '1');
   final _custoCtrl = TextEditingController(text: '0');
   final _motivoCtrl = TextEditingController(text: 'compra');
@@ -25,7 +24,6 @@ class _ManualEntryPageState extends ConsumerState<ManualEntryPage> {
   @override
   void dispose() {
     _idCtrl.dispose();
-    _nameCtrl.dispose();
     _qtdCtrl.dispose();
     _custoCtrl.dispose();
     _motivoCtrl.dispose();
@@ -56,7 +54,6 @@ class _ManualEntryPageState extends ConsumerState<ManualEntryPage> {
     final qtd = int.tryParse(_qtdCtrl.text.trim()) ?? 0;
     final custo = _parseDouble(_custoCtrl.text);
     var prodId = _idCtrl.text.trim();
-    final nomeDigitado = _nameCtrl.text.trim();
     final motivo = _motivoCtrl.text.trim();
 
     if (qtd <= 0) {
@@ -76,62 +73,74 @@ class _ManualEntryPageState extends ConsumerState<ManualEntryPage> {
       final movs =
           db.collection('tenants').doc(tenantId).collection('movimentos');
 
-      // gera docId se não informado
+      // 1) Garante um ID de produto
+      DocumentReference<Map<String, dynamic>> prodRef;
+      DocumentSnapshot<Map<String, dynamic>> prodSnap;
+
       if (prodId.isEmpty) {
-        prodId = prods.doc().id;
+        // se não veio id, gera um doc novo
+        prodRef = prods.doc();
+        prodId = prodRef.id;
+        prodSnap = await prodRef.get();
+      } else {
+        prodRef = prods.doc(prodId);
+        prodSnap = await prodRef.get();
       }
 
-      final prodRef = prods.doc(prodId);
-      final movRef = movs.doc();
+      // 2) Se o produto não existe, abre diálogo padronizado para criá-lo
+      if (!prodSnap.exists) {
+        final created = await _showCreateProductDialog(
+          context: context,
+          tenantId: tenantId,
+          uid: uid,
+          prodRef: prodRef,
+          precoSugerido: custo,
+        );
 
+        if (!created) {
+          // usuário cancelou ou deu erro
+          if (mounted) {
+            setState(() => _busy = false);
+          }
+          return;
+        }
+        // após criar, recarrega o snapshot
+        prodSnap = await prodRef.get();
+      }
+
+      // 3) Agora o produto existe; registra a entrada + atualiza estoque
       await db.runTransaction((tx) async {
         final snap = await tx.get(prodRef);
+        final data = snap.data() ?? {};
 
-        // Se não existir, cria com estrutura mínima (bate regras de CREATE)
-        if (!snap.exists) {
-          final nome = (nomeDigitado.isNotEmpty ? nomeDigitado : prodId);
-          tx.set(prodRef, {
-            'nome': nome,
-            'nomeLower': nome.toLowerCase(),
-            'categoria': '',
-            'sku': '',
-            'precoVenda': 0, // ter ao menos um preço >=0
-            'quantidade': 0,
-            'estoqueMinimo': 1,
-            'ativo': true,
-            'createdAt': FieldValue.serverTimestamp(),
-            'createdBy': uid,
-            'updatedAt': FieldValue.serverTimestamp(),
-            'updatedBy': uid,
-          });
-        }
+        final nome = (data['nome'] as String?) ?? prodId;
+        final atual = (data['quantidade'] as int?) ?? 0;
 
-        // Nome para o movimento (se já existir, usa o do banco)
-        String nomeMov = nomeDigitado;
-        final afterGet = await tx.get(prodRef);
-        final data = afterGet.data();
-        if (data != null &&
-            data['nome'] is String &&
-            (data['nome'] as String).isNotEmpty) {
-          nomeMov = data['nome'] as String;
-        }
-        if (nomeMov.isEmpty) nomeMov = prodId;
+        final novoEstoque = atual + qtd;
 
-        // Atualiza estoque (PATCH permitido nas rules)
+        final precoVenda = (data['preco'] as num?)?.toDouble() ??
+            (data['precoVenda'] as num?)?.toDouble() ??
+            custo;
+
+        // Atualiza produto
         tx.update(prodRef, {
-          'quantidade': FieldValue.increment(qtd),
+          'quantidade': novoEstoque,
+          'preco': precoVenda,
+          'precoVenda': precoVenda,
           'updatedAt': FieldValue.serverTimestamp(),
           'updatedBy': uid,
         });
 
         // Registra o movimento
+        final movRef = movs.doc();
         tx.set(movRef, {
           'tipo': 'entrada',
           'quantidade': qtd,
-          'produtoId': prodId,
-          'produtoNome': nomeMov,
+          'produtoId': prodRef.id,
+          'produtoNome': nome,
           'usuarioId': uid,
-          'preco': custo, // custo unitário (opcional nas rules)
+          'preco': custo, // custo unitário informado aqui
+          'valorTotal': custo * qtd,
           'motivo': motivo.isEmpty ? 'entrada manual' : motivo,
           'origem': 'manual',
           'createdAt': FieldValue.serverTimestamp(),
@@ -152,6 +161,168 @@ class _ManualEntryPageState extends ConsumerState<ManualEntryPage> {
     }
   }
 
+  /// Diálogo padronizado para criar produto quando não existe.
+  Future<bool> _showCreateProductDialog({
+    required BuildContext context,
+    required String tenantId,
+    required String uid,
+    required DocumentReference<Map<String, dynamic>> prodRef,
+    double? precoSugerido,
+  }) async {
+    final nomeCtrl = TextEditingController();
+    final precoCtrl =
+        TextEditingController(text: (precoSugerido ?? 0).toStringAsFixed(2));
+    final minCtrl = TextEditingController(text: '0');
+    final categoriaCtrl = TextEditingController();
+    final skuCtrl = TextEditingController();
+
+    String? err;
+    bool saving = false;
+    bool created = false;
+
+    await showDialog(
+      context: context,
+      barrierDismissible: !saving,
+      builder: (ctx) {
+        return StatefulBuilder(
+          builder: (ctx, setLocal) {
+            Future<void> save() async {
+              if (saving) return;
+              setLocal(() {
+                err = null;
+                saving = true;
+              });
+
+              final nome = nomeCtrl.text.trim();
+              final min = int.tryParse(minCtrl.text.trim()) ?? 0;
+              final preco = _parseDouble(precoCtrl.text);
+
+              if (nome.isEmpty) {
+                setLocal(() {
+                  err = 'Informe o nome do produto.';
+                  saving = false;
+                });
+                return;
+              }
+
+              try {
+                final data = <String, dynamic>{
+                  'nome': nome,
+                  'nomeLower': nome.toLowerCase(),
+                  'categoria': categoriaCtrl.text.trim(),
+                  'sku': skuCtrl.text.trim(),
+                  'preco': preco,
+                  'precoVenda': preco,
+                  'quantidade': 0,
+                  'estoqueMinimo': min,
+                  'ativo': true,
+                  'createdAt': FieldValue.serverTimestamp(),
+                  'createdBy': uid,
+                  'updatedAt': FieldValue.serverTimestamp(),
+                  'updatedBy': uid,
+                };
+
+                await prodRef.set(data);
+
+                created = true;
+                if (!context.mounted) return;
+                Navigator.pop(context);
+              } on FirebaseException catch (e) {
+                setLocal(() {
+                  err = '${e.code}: ${e.message}';
+                  saving = false;
+                });
+              } catch (e) {
+                setLocal(() {
+                  err = e.toString();
+                  saving = false;
+                });
+              }
+            }
+
+            return AlertDialog(
+              shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(24),
+              ),
+              title: Text('Criar produto\nID: ${prodRef.id}',
+                  style: Theme.of(context).textTheme.titleMedium),
+              content: SizedBox(
+                width: 420,
+                child: SingleChildScrollView(
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      TextField(
+                        controller: nomeCtrl,
+                        decoration: const InputDecoration(
+                          labelText: 'Nome *',
+                        ),
+                      ),
+                      const SizedBox(height: 12),
+                      TextField(
+                        controller: precoCtrl,
+                        decoration: const InputDecoration(
+                          labelText: 'Preço de venda *',
+                        ),
+                        keyboardType: const TextInputType.numberWithOptions(
+                          decimal: true,
+                        ),
+                      ),
+                      const SizedBox(height: 12),
+                      TextField(
+                        controller: minCtrl,
+                        decoration: const InputDecoration(
+                          labelText: 'Estoque mínimo',
+                        ),
+                        keyboardType: TextInputType.number,
+                      ),
+                      const SizedBox(height: 12),
+                      TextField(
+                        controller: categoriaCtrl,
+                        decoration: const InputDecoration(
+                          labelText: 'Categoria (opcional)',
+                        ),
+                      ),
+                      const SizedBox(height: 12),
+                      TextField(
+                        controller: skuCtrl,
+                        decoration: const InputDecoration(
+                          labelText: 'SKU (opcional)',
+                        ),
+                      ),
+                      if (err != null) ...[
+                        const SizedBox(height: 8),
+                        Align(
+                          alignment: Alignment.centerLeft,
+                          child: Text(
+                            err!,
+                            style: const TextStyle(color: Colors.red),
+                          ),
+                        ),
+                      ],
+                    ],
+                  ),
+                ),
+              ),
+              actions: [
+                TextButton(
+                  onPressed: saving ? null : () => Navigator.pop(context),
+                  child: const Text('Cancelar'),
+                ),
+                FilledButton(
+                  onPressed: saving ? null : save,
+                  child: Text(saving ? 'Criando...' : 'Criar'),
+                ),
+              ],
+            );
+          },
+        );
+      },
+    );
+
+    return created;
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -162,17 +333,9 @@ class _ManualEntryPageState extends ConsumerState<ManualEntryPage> {
           TextField(
             controller: _idCtrl,
             decoration: const InputDecoration(
-              labelText: 'ID do produto (documentId)',
-              hintText: 'Deixe em branco para gerar automaticamente',
+              labelText: 'ID do produto (documentId) – opcional',
+              hintText: 'Deixe vazio para criar com ID automático',
               prefixIcon: Icon(Icons.tag),
-            ),
-          ),
-          const SizedBox(height: 12),
-          TextField(
-            controller: _nameCtrl,
-            decoration: const InputDecoration(
-              labelText: 'Nome do produto (usado se criar novo)',
-              prefixIcon: Icon(Icons.inventory_2_outlined),
             ),
           ),
           const SizedBox(height: 12),
@@ -204,7 +367,10 @@ class _ManualEntryPageState extends ConsumerState<ManualEntryPage> {
           ),
           const SizedBox(height: 16),
           if (_err != null)
-            Text(_err!, style: const TextStyle(color: Colors.red)),
+            Text(
+              _err!,
+              style: const TextStyle(color: Colors.red),
+            ),
           const SizedBox(height: 8),
           FilledButton(
             onPressed: _busy ? null : _save,

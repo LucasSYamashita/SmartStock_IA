@@ -1,3 +1,4 @@
+// lib/features/chat/fallback_inventory.dart
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 
@@ -26,6 +27,7 @@ class FallbackInventory {
     Map<String, dynamic>? data;
 
     if (snap.docs.isEmpty) {
+      // Cria o produto se não existir
       doc = await produtos.add({
         'nome': nome,
         'nomeLower': nome.toLowerCase(),
@@ -64,6 +66,7 @@ class FallbackInventory {
       'preco': preco ?? data?['preco'] ?? 0,
       'valorTotal': (preco ?? data?['preco'] ?? 0) * quantidade,
       'usuarioId': uid,
+      'tenantId': tenantId,
       'origem': 'chat-fallback',
       'motivo': 'chatbot',
       'createdAt': FieldValue.serverTimestamp(),

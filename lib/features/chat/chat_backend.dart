@@ -1,12 +1,14 @@
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:cloud_functions/cloud_functions.dart';
-import 'package:firebase_auth/firebase_auth.dart';
+
 import '../../config/feature_flags.dart';
 import 'fallback_inventory.dart';
 
+/// Resultado padronizado do chat (tanto IA quanto fallback)
 class ChatResult {
   final String message;
-  final String intent;
+  final String
+      intent; // 'entrada' | 'saida' | 'consulta' | 'sugestao' | 'geral'
   final String? produto;
   final int? quantidade;
   final double? preco;
@@ -30,6 +32,7 @@ class ChatResult {
       );
 }
 
+/// Backend genérico do chat
 abstract class ChatBackend {
   Future<ChatResult> respond({
     required String tenantId,
@@ -38,12 +41,18 @@ abstract class ChatBackend {
   });
 }
 
+/// BACKEND PRINCIPAL: usa Cloud Function `chatRespond` (IA + Vertex)
+/// e, se a IA entender que é entrada/saída, grava o movimento via `FallbackInventory`.
 class CloudFunctionsChatBackend implements ChatBackend {
-  final FirebaseFunctions functions =
-      FirebaseFunctions.instanceFor(region: 'southamerica-east1');
+  final FirebaseFunctions functions;
+  final FallbackInventory inventory;
   final ChatBackend fallback;
 
-  CloudFunctionsChatBackend({required this.fallback});
+  CloudFunctionsChatBackend({
+    required FirebaseFirestore db,
+    required this.fallback,
+  })  : functions = FirebaseFunctions.instanceFor(region: 'us-central1'),
+        inventory = FallbackInventory(db);
 
   @override
   Future<ChatResult> respond({
@@ -52,17 +61,48 @@ class CloudFunctionsChatBackend implements ChatBackend {
     required String text,
   }) async {
     try {
-      final call = functions.httpsCallable('chatRespond');
-      final res = await call.call({
+      print(
+          '🛰 [chat] Enviando para chatRespond: tenant=$tenantId user=$userId enableVertex=$kEnableVertex text="$text"');
+
+      final callable = functions.httpsCallable('chatRespond');
+      final res = await callable.call({
         'tenantId': tenantId,
         'userId': userId,
         'text': text,
         'enableVertex': kEnableVertex,
       });
+
       final data = Map<String, dynamic>.from(res.data ?? {});
-      return ChatResult.fromMap(data);
-    } catch (e) {
-      print('⚠️ Erro Cloud Function: $e → fallback local');
+      print('✅ [chat] chatRespond retorno: $data');
+
+      final result = ChatResult.fromMap(data);
+
+      // Se a IA entendeu como entrada/saída, registramos o movimento aqui.
+      final isMov = result.intent == 'entrada' || result.intent == 'saida';
+
+      if (isMov &&
+          result.produto != null &&
+          result.quantidade != null &&
+          result.quantidade! > 0) {
+        print(
+          '📦 [chat] Registrando via IA: '
+          '${result.intent} ${result.quantidade}x ${result.produto} '
+          '(preço=${result.preco})',
+        );
+
+        await inventory.registrar(
+          tenantId: tenantId,
+          nome: result.produto!,
+          quantidade: result.quantidade!,
+          tipo: result.intent, // 'entrada' | 'saida'
+          preco: result.preco,
+        );
+      }
+
+      return result;
+    } catch (e, st) {
+      print(
+          '⚠️ [chat] Erro na Cloud Function chatRespond: $e\n$st\n→ usando fallback local');
       return fallback.respond(
         tenantId: tenantId,
         userId: userId,
@@ -72,9 +112,14 @@ class CloudFunctionsChatBackend implements ChatBackend {
   }
 }
 
+/// FALLBACK LOCAL: só entra se a Function falhar.
+/// Sintaxe simples:
+///   - "entrada 10 coca a 4,25"
+///   - "saida 3 coca a 5"
 class LocalChatBackend implements ChatBackend {
   final FirebaseFirestore db;
   final FallbackInventory inventory;
+
   LocalChatBackend(this.db) : inventory = FallbackInventory(db);
 
   @override
@@ -83,6 +128,8 @@ class LocalChatBackend implements ChatBackend {
     required String userId,
     required String text,
   }) async {
+    print('🛟 [chat] Fallback local acionado para texto: "$text"');
+
     final t = text.toLowerCase().trim();
 
     final entrada =
@@ -93,10 +140,12 @@ class LocalChatBackend implements ChatBackend {
     if (entrada.hasMatch(t)) {
       final m = entrada.firstMatch(t)!;
       final qtd = int.parse(m.group(1)!);
-      final nome = m.group(2)!;
+      final nome = m.group(2)!.trim();
       final preco = m.group(3) != null
           ? double.tryParse(m.group(3)!.replaceAll(',', '.'))
           : null;
+
+      print('⚙️ [chat] Fallback: registrando ENTRADA localmente $qtd x $nome');
 
       await inventory.registrar(
         tenantId: tenantId,
@@ -108,7 +157,7 @@ class LocalChatBackend implements ChatBackend {
 
       return ChatResult(
         message:
-            '✅ Entrada registrada localmente: +${qtd} x $nome${preco != null ? " a R\$${preco.toStringAsFixed(2)}" : ""}.',
+            '✅ Entrada registrada localmente (fallback): +$qtd x $nome${preco != null ? " a R\$${preco.toStringAsFixed(2)}" : ""}.',
         intent: 'entrada',
         produto: nome,
         quantidade: qtd,
@@ -119,10 +168,12 @@ class LocalChatBackend implements ChatBackend {
     if (saida.hasMatch(t)) {
       final m = saida.firstMatch(t)!;
       final qtd = int.parse(m.group(2)!);
-      final nome = m.group(3)!;
+      final nome = m.group(3)!.trim();
       final preco = m.group(4) != null
           ? double.tryParse(m.group(4)!.replaceAll(',', '.'))
           : null;
+
+      print('⚙️ [chat] Fallback: registrando SAÍDA localmente $qtd x $nome');
 
       await inventory.registrar(
         tenantId: tenantId,
@@ -134,7 +185,7 @@ class LocalChatBackend implements ChatBackend {
 
       return ChatResult(
         message:
-            '✅ Saída registrada localmente: -${qtd} x $nome${preco != null ? " a R\$${preco.toStringAsFixed(2)}" : ""}.',
+            '✅ Saída registrada localmente (fallback): -$qtd x $nome${preco != null ? " a R\$${preco.toStringAsFixed(2)}" : ""}.',
         intent: 'saida',
         produto: nome,
         quantidade: qtd,
@@ -144,26 +195,31 @@ class LocalChatBackend implements ChatBackend {
 
     if (t.contains('baixo estoque') || t.contains('sugest')) {
       return ChatResult(
-        message: 'Verificando produtos com estoque baixo...',
+        message: 'Verificando produtos com estoque baixo (fallback)...',
         intent: 'sugestao',
       );
     }
 
     if (t.contains('quanto') || t.contains('tem')) {
       return ChatResult(
-        message: 'Use: "quanto tem de [produto]" para consultar estoque.',
+        message:
+            'Use: "quanto tem de [produto]" para consultar estoque (fallback).',
         intent: 'consulta',
       );
     }
 
     return ChatResult(
       message:
-          'Posso ajudar com **entrada**, **saída**, **consulta** e **sugestão**. Ex: "entrada 10 coca a 8,50", "venda 3 coca", "o que repor?".',
+          'Posso ajudar com **entrada**, **saída**, **consulta** e **sugestão**. '
+          'Ex: "entrada 10 coca a 8,50", "venda 3 coca", "o que repor?".',
       intent: 'geral',
     );
   }
 }
 
-ChatBackend makeChatBackend(FirebaseFirestore db) {
-  return CloudFunctionsChatBackend(fallback: LocalChatBackend(db));
+/// Factory: usa Function + fallback automático
+ChatBackend makeChatBackend() {
+  final db = FirebaseFirestore.instance;
+  final local = LocalChatBackend(db);
+  return CloudFunctionsChatBackend(db: db, fallback: local);
 }

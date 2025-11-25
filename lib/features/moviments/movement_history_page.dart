@@ -14,8 +14,9 @@ class MovementHistoryPage extends ConsumerStatefulWidget {
 }
 
 class _MovementHistoryPageState extends ConsumerState<MovementHistoryPage> {
-  String _tipo = 'todos'; // todos, entrada, saida, ajuste
-  String _pay = 'todos'; // todos, pix, credito, debito, dinheiro, outros
+  String _tipo = 'todos'; // todos, entrada, saida
+  DateTime? _from;
+  DateTime? _to;
 
   @override
   Widget build(BuildContext context) {
@@ -24,17 +25,35 @@ class _MovementHistoryPageState extends ConsumerState<MovementHistoryPage> {
       return const Scaffold(body: Center(child: Text('Selecione uma loja.')));
     }
 
+    // base da coleção
     Query<Map<String, dynamic>> q = FirebaseFirestore.instance
         .collection('tenants')
         .doc(tenantId)
-        .collection('movimentos')
-        .orderBy('createdAt', descending: true)
-        .limit(300);
+        .collection('movimentos');
 
+    // filtro por tipo
     if (_tipo != 'todos') q = q.where('tipo', isEqualTo: _tipo);
-    if (_tipo == 'saida' && _pay != 'todos') {
-      q = q.where('paymentMethod', isEqualTo: _pay);
+
+    // filtro por data
+    if (_from != null) {
+      final fromDayStart =
+          DateTime(_from!.year, _from!.month, _from!.day); // 00:00
+      q = q.where(
+        'createdAt',
+        isGreaterThanOrEqualTo: Timestamp.fromDate(fromDayStart),
+      );
     }
+    if (_to != null) {
+      final toDayEnd =
+          DateTime(_to!.year, _to!.month, _to!.day, 23, 59, 59, 999);
+      q = q.where(
+        'createdAt',
+        isLessThanOrEqualTo: Timestamp.fromDate(toDayEnd),
+      );
+    }
+
+    // ordenação + limite
+    q = q.orderBy('createdAt', descending: true).limit(300);
 
     return Scaffold(
       appBar: AppBar(
@@ -56,12 +75,17 @@ class _MovementHistoryPageState extends ConsumerState<MovementHistoryPage> {
         children: [
           _Filters(
             tipo: _tipo,
-            pagamento: _pay,
+            from: _from,
+            to: _to,
             onChangeTipo: (v) => setState(() {
               _tipo = v;
-              if (_tipo != 'saida') _pay = 'todos';
             }),
-            onChangePagamento: (v) => setState(() => _pay = v),
+            onChangeFrom: (d) => setState(() => _from = d),
+            onChangeTo: (d) => setState(() => _to = d),
+            onClearDates: () => setState(() {
+              _from = null;
+              _to = null;
+            }),
           ),
           const Divider(height: 1),
           Expanded(
@@ -93,14 +117,17 @@ class _MovementHistoryPageState extends ConsumerState<MovementHistoryPage> {
                   final ts = m['createdAt'];
                   final dt = ts is Timestamp ? ts.toDate() : null;
 
-                  // 🔹 pega preço de qualquer campo possível
+                  // preços possíveis
                   final unitCost = (m['unitCost'] as num?)?.toDouble();
                   final unitPrice = (m['unitPrice'] as num?)?.toDouble();
                   final totalValue = (m['totalValue'] as num?)?.toDouble();
+                  final valorTotalLegacy =
+                      (m['valorTotal'] as num?)?.toDouble();
                   final preco = (m['preco'] as num?)?.toDouble();
 
-                  // 🔹 prioridade: totalValue > unitCost/unitPrice > preco
-                  final total = totalValue ??
+                  // mesmo cálculo que usamos em dashboard/CSV
+                  final total = valorTotalLegacy ??
+                      totalValue ??
                       (((tipo == 'entrada'
                                   ? (unitCost ?? preco)
                                   : (unitPrice ?? preco)) ??
@@ -232,8 +259,15 @@ class _MovementHistoryPageState extends ConsumerState<MovementHistoryPage> {
 
       final lines = <String>['*Relatório de movimentações*'];
       if (_tipo != 'todos') lines.add('Tipo: ${_tipo.toUpperCase()}');
-      if (_tipo == 'saida' && _pay != 'todos') {
-        lines.add('Pagamento: ${_labelPay(_pay)}');
+      if (_from != null || _to != null) {
+        final parts = <String>[];
+        if (_from != null) {
+          parts.add('de ${_fmt(_from!)}');
+        }
+        if (_to != null) {
+          parts.add('até ${_fmt(_to!)}');
+        }
+        lines.add(parts.join(' '));
       }
       lines.add('');
 
@@ -246,8 +280,19 @@ class _MovementHistoryPageState extends ConsumerState<MovementHistoryPage> {
         final dt = ts is Timestamp ? _fmt(ts.toDate()) : '';
         final pay = (m['paymentMethod'] ?? '').toString();
 
-        final preco = (m['preco'] as num?)?.toDouble() ?? 0.0;
-        final total = preco * qtd;
+        final unitCost = (m['unitCost'] as num?)?.toDouble();
+        final unitPrice = (m['unitPrice'] as num?)?.toDouble();
+        final totalValue = (m['totalValue'] as num?)?.toDouble();
+        final valorTotalLegacy = (m['valorTotal'] as num?)?.toDouble();
+        final preco = (m['preco'] as num?)?.toDouble();
+
+        final total = valorTotalLegacy ??
+            totalValue ??
+            (((tipo == 'ENTRADA'
+                        ? (unitCost ?? preco)
+                        : (unitPrice ?? preco)) ??
+                    0.0) *
+                qtd);
 
         if (tipo == 'ENTRADA') totE += total;
         if (tipo == 'SAIDA') totS += total;
@@ -300,8 +345,20 @@ class _MovementHistoryPageState extends ConsumerState<MovementHistoryPage> {
 
         final tipo = (m['tipo'] ?? '').toString();
         final qtd = (m['quantidade'] ?? 0) as int;
-        final preco = (m['preco'] as num?)?.toDouble() ?? 0.0;
-        final total = preco * qtd;
+
+        final unitCost = (m['unitCost'] as num?)?.toDouble();
+        final unitPrice = (m['unitPrice'] as num?)?.toDouble();
+        final totalValue = (m['totalValue'] as num?)?.toDouble();
+        final valorTotalLegacy = (m['valorTotal'] as num?)?.toDouble();
+        final preco = (m['preco'] as num?)?.toDouble();
+
+        final total = valorTotalLegacy ??
+            totalValue ??
+            (((tipo == 'entrada'
+                        ? (unitCost ?? preco)
+                        : (unitPrice ?? preco)) ??
+                    0.0) *
+                qtd);
 
         rows.add([
           tipo,
@@ -309,7 +366,7 @@ class _MovementHistoryPageState extends ConsumerState<MovementHistoryPage> {
           '${m['produtoId'] ?? ''}',
           '${m['produtoNome'] ?? ''}',
           '${m['paymentMethod'] ?? ''}',
-          preco.toStringAsFixed(2),
+          (preco ?? 0.0).toStringAsFixed(2),
           total.toStringAsFixed(2),
           '${m['motivo'] ?? ''}',
           '${m['origem'] ?? ''}',
@@ -336,18 +393,28 @@ class _MovementHistoryPageState extends ConsumerState<MovementHistoryPage> {
 
 class _Filters extends StatelessWidget {
   final String tipo;
-  final String pagamento;
+  final DateTime? from;
+  final DateTime? to;
   final ValueChanged<String> onChangeTipo;
-  final ValueChanged<String> onChangePagamento;
+  final ValueChanged<DateTime?> onChangeFrom;
+  final ValueChanged<DateTime?> onChangeTo;
+  final VoidCallback onClearDates;
+
   const _Filters({
     required this.tipo,
-    required this.pagamento,
+    required this.from,
+    required this.to,
     required this.onChangeTipo,
-    required this.onChangePagamento,
+    required this.onChangeFrom,
+    required this.onChangeTo,
+    required this.onClearDates,
   });
 
   @override
   Widget build(BuildContext context) {
+    String two(int x) => x.toString().padLeft(2, '0');
+    String fmtDate(DateTime d) => '${two(d.day)}/${two(d.month)}/${d.year}';
+
     return Padding(
       padding: const EdgeInsets.fromLTRB(12, 8, 12, 8),
       child: Wrap(
@@ -362,27 +429,44 @@ class _Filters extends StatelessWidget {
               DropdownMenuItem(value: 'todos', child: Text('Todos')),
               DropdownMenuItem(value: 'entrada', child: Text('Entrada')),
               DropdownMenuItem(value: 'saida', child: Text('Saída')),
-              DropdownMenuItem(value: 'ajuste', child: Text('Ajuste')),
             ],
             onChanged: (v) => onChangeTipo(v ?? 'todos'),
           ),
           const SizedBox(width: 8),
-          const Text('Pagamento:'),
-          DropdownButton<String>(
-            value: pagamento,
-            items: const [
-              DropdownMenuItem(value: 'todos', child: Text('Todos')),
-              DropdownMenuItem(value: 'pix', child: Text('Pix')),
-              DropdownMenuItem(value: 'credito', child: Text('Crédito')),
-              DropdownMenuItem(value: 'debito', child: Text('Débito')),
-              DropdownMenuItem(value: 'dinheiro', child: Text('Dinheiro')),
-              DropdownMenuItem(value: 'outros', child: Text('Outros')),
-            ],
-            onChanged: (v) => onChangePagamento(v ?? 'todos'),
+          FilledButton.tonal(
+            onPressed: () async {
+              final picked = await showDatePicker(
+                context: context,
+                initialDate: from ?? DateTime.now(),
+                firstDate: DateTime(2020),
+                lastDate: DateTime(2100),
+              );
+              if (picked != null) onChangeFrom(picked);
+            },
+            child: Text(
+              from == null ? 'Data inicial' : 'De: ${fmtDate(from!)}',
+            ),
           ),
-          const SizedBox(width: 8),
-          const Text('(pagamento só filtra “Saída”)',
-              style: TextStyle(fontSize: 12, color: Colors.white60)),
+          FilledButton.tonal(
+            onPressed: () async {
+              final picked = await showDatePicker(
+                context: context,
+                initialDate: to ?? DateTime.now(),
+                firstDate: DateTime(2020),
+                lastDate: DateTime(2100),
+              );
+              if (picked != null) onChangeTo(picked);
+            },
+            child: Text(
+              to == null ? 'Data final' : 'Até: ${fmtDate(to!)}',
+            ),
+          ),
+          if (from != null || to != null)
+            IconButton(
+              tooltip: 'Limpar datas',
+              onPressed: onClearDates,
+              icon: const Icon(Icons.clear),
+            ),
         ],
       ),
     );

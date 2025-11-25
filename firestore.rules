@@ -1,31 +1,128 @@
-// SmartStock Firestore Security Rules (Flutter-only MVP)
 rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
 
-    function isSignedIn() { return request.auth != null; }
-    function userDoc(uid) { return get(/databases/$(database)/documents/usuarios/$(uid)); }
-    function userRole() { return isSignedIn() ? userDoc(request.auth.uid).data.role : null; }
-    function isAdmin() { return userRole() == "admin"; }
-    function isStaff() { return userRole() == "staff" || isAdmin(); }
+    // ---------------------------
+    // Helpers
+    // ---------------------------
+    function isSignedIn() {
+      return request.auth != null;
+    }
 
+    // Caminho do membership
+    function memberPath(t, uid) {
+      return /databases/$(database)/documents/tenants/$(t)/usuarios/$(uid);
+    }
+
+    function isMember(t) {
+      return isSignedIn() && exists(memberPath(t, request.auth.uid));
+    }
+
+    // Retorna o papel do usuário na loja (admin, staff, viewer)
+    function role(t) {
+      return isMember(t)
+        ? (
+            get(memberPath(t, request.auth.uid)).data.role == "admin"
+              ? "admin"
+              : (
+                  get(memberPath(t, request.auth.uid)).data.role == "staff"
+                    ? "staff"
+                    : "viewer"
+                )
+          )
+        : "viewer";
+    }
+
+    function isAdmin(t) {
+      return role(t) == "admin";
+    }
+
+    function isStaffOrAdmin(t) {
+      return role(t) == "admin" || role(t) == "staff";
+    }
+
+    // ==========================================================
+    // PERFIL GLOBAL
+    // ==========================================================
     match /usuarios/{uid} {
-      allow read: if isSignedIn() && request.auth.uid == uid;
-      allow write: if isSignedIn() && request.auth.uid == uid; // ajuste conforme sua política
+      allow read, write: if isSignedIn() && request.auth.uid == uid;
     }
 
-    match /produtos/{id} {
-      allow read: if isSignedIn();
-      // Somente admin cria/edita produtos
-      allow create, update, delete: if isAdmin();
+    match /users/{uid} {
+      allow read, write: if isSignedIn() && request.auth.uid == uid;
     }
 
-    match /movimentacoes/{id} {
+    // ==========================================================
+    // TENANTS
+    // ==========================================================
+    match /tenants/{tenantId} {
+
+      // qualquer usuário logado pode criar uma loja
+      allow create: if isSignedIn();
+
+      // ler uma loja → qualquer logado
       allow read: if isSignedIn();
-      // Qualquer staff (ou admin) pode registrar movimentação
-      allow create: if isStaff();
-      // Histórico imutável
-      allow update, delete: if false;
+
+      // atualizar/deletar → somente admin da loja
+      allow update, delete: if isSignedIn() && isAdmin(tenantId);
+
+      // ---------------------- SUBCOLEÇÃO: usuarios -------------------------
+      match /usuarios/{uid} {
+
+        // ler → admin da loja ou o próprio usuário
+        allow read: if isSignedIn()
+          && (isAdmin(tenantId) || request.auth.uid == uid);
+
+        // qualquer usuário logado pode entrar na loja
+        allow create: if isSignedIn();
+
+        // update/delete → admin OU o próprio usuário
+        allow update, delete: if isSignedIn()
+          && (isAdmin(tenantId) || request.auth.uid == uid);
+      }
+
+      // ---------------------- SUBCOLEÇÃO: produtos -------------------------
+      match /produtos/{prodId} {
+        allow read: if isSignedIn() && isMember(tenantId);
+        allow create, update: if isSignedIn() && isStaffOrAdmin(tenantId);
+        allow delete: if isSignedIn() && isAdmin(tenantId);
+      }
+
+      // ---------------------- SUBCOLEÇÃO: movimentos -----------------------
+      match /movimentos/{movId} {
+        allow read: if isSignedIn() && isMember(tenantId);
+
+        allow create: if isSignedIn()
+          && isStaffOrAdmin(tenantId)
+          && request.resource.data.tipo in ["entrada","saida","ajuste"]
+          && request.resource.data.quantidade is number;
+
+        allow update, delete: if false;
+      }
+
+      // ---------------------- SUBCOLEÇÃO: __chat_state__ -------------------
+      match /__chat_state__/{uid} {
+        allow read, write: if isSignedIn() && isStaffOrAdmin(tenantId);
+      }
+
+      // ---------------------- SUBCOLEÇÃO: vendas ---------------------------
+      match /vendas/{saleId} {
+        allow read: if isSignedIn() && isMember(tenantId);
+        allow create: if isSignedIn() && isStaffOrAdmin(tenantId);
+      }
+
+      // ---------------------- SUBCOLEÇÃO: __diag__ -------------------------
+      match /__diag__/{docId} {
+        allow read, write: if isSignedIn() && isStaffOrAdmin(tenantId);
+      }
+    }
+
+    // ==========================================================
+    // TENANT_CODES (join por código)
+    // ==========================================================
+    match /tenant_codes/{code} {
+      allow read: if isSignedIn();
+      allow write: if false;
     }
   }
 }

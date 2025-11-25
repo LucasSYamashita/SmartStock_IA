@@ -157,7 +157,7 @@ class _HomePageState extends ConsumerState<HomePage> {
     return double.tryParse(s) ?? 0.0;
   }
 
-  /// Diálogo: criar produto (+ log de entrada inicial, se quantidade > 0).
+  /// Diálogo: criar/ajustar produto (+ log de entrada inicial, se quantidade > 0).
   Future<void> _addProduct(BuildContext context) async {
     final nameCtrl = TextEditingController();
     final brandCtrl = TextEditingController(); // apenas visual
@@ -199,53 +199,86 @@ class _HomePageState extends ConsumerState<HomePage> {
               }
               final uid = user.uid;
 
-              final data = <String, dynamic>{
-                'nome': nome,
-                'nomeLower': nome.toLowerCase(),
-                'categoria': '',
-                'sku': '',
-                'preco': preco,
-                'quantidade': quantidade,
-                'estoqueMinimo': minimo,
-                'ativo': true,
-                'createdAt': FieldValue.serverTimestamp(),
-                'createdBy': uid,
-                'updatedAt': FieldValue.serverTimestamp(),
-                'updatedBy': uid,
-              };
-
-              // cria o produto
-              final doc = await FirebaseFirestore.instance
+              final db = FirebaseFirestore.instance;
+              final prods =
+                  db.collection('tenants').doc(tenantId).collection('produtos');
+              final movs = db
                   .collection('tenants')
                   .doc(tenantId)
-                  .collection('produtos')
-                  .add(data);
+                  .collection('movimentos');
+
+              final nomeLower = nome.toLowerCase();
+
+              // Verifica se já existe produto com mesmo nomeLower
+              final existingSnap = await prods
+                  .where('nomeLower', isEqualTo: nomeLower)
+                  .limit(1)
+                  .get();
+
+              DocumentReference<Map<String, dynamic>> prodRef;
+              int novaQtd;
+
+              if (existingSnap.docs.isNotEmpty) {
+                // reaproveita produto existente
+                final doc = existingSnap.docs.first;
+                prodRef = doc.reference;
+                final data = doc.data();
+                final atual = (data['quantidade'] ?? 0) as int;
+                novaQtd = atual + quantidade;
+
+                await prodRef.update({
+                  'precoVenda': preco,
+                  'estoqueMinimo': minimo,
+                  'ativo': true,
+                  'quantidade': novaQtd,
+                  'updatedAt': FieldValue.serverTimestamp(),
+                  'updatedBy': uid,
+                });
+              } else {
+                // cria novo produto
+                prodRef = prods.doc();
+                novaQtd = quantidade;
+
+                await prodRef.set({
+                  'nome': nome,
+                  'nomeLower': nomeLower,
+                  'categoria': '',
+                  'sku': '',
+                  'precoVenda': preco,
+                  'quantidade': novaQtd,
+                  'estoqueMinimo': minimo,
+                  'ativo': true,
+                  'createdAt': FieldValue.serverTimestamp(),
+                  'createdBy': uid,
+                  'updatedAt': FieldValue.serverTimestamp(),
+                  'updatedBy': uid,
+                });
+              }
+
+              // log de entrada (best-effort), se quantidade > 0
+              if (quantidade > 0) {
+                final valorTotal = preco * quantidade;
+                await movs.add({
+                  'tipo': 'entrada',
+                  'quantidade': quantidade,
+                  'produtoId': prodRef.id,
+                  'produtoNome': nome,
+                  'usuarioId': uid,
+                  'preco': preco,
+                  'valorTotal': valorTotal,
+                  'origem': 'create_product',
+                  'motivo': existingSnap.docs.isNotEmpty
+                      ? 'ajuste manual'
+                      : 'cadastro inicial',
+                  'createdAt': FieldValue.serverTimestamp(),
+                });
+              }
 
               if (!context.mounted) return;
               Navigator.pop(context);
               ScaffoldMessenger.of(context).showSnackBar(
-                const SnackBar(content: Text('Produto criado.')),
+                const SnackBar(content: Text('Produto salvo.')),
               );
-
-              // log de entrada (best-effort)
-              if (quantidade > 0) {
-                try {
-                  await FirebaseFirestore.instance
-                      .collection('tenants')
-                      .doc(tenantId)
-                      .collection('movimentos')
-                      .add({
-                    'tipo': 'entrada',
-                    'quantidade': quantidade,
-                    'produtoId': doc.id,
-                    'produtoNome': nome,
-                    'usuarioId': uid,
-                    'origem': 'create_product',
-                    'motivo': 'cadastro inicial',
-                    'createdAt': FieldValue.serverTimestamp(),
-                  });
-                } catch (_) {}
-              }
             } on FirebaseException catch (e) {
               setLocal(() => err = '${e.code}: ${e.message}');
             } catch (e) {
@@ -288,7 +321,8 @@ class _HomePageState extends ConsumerState<HomePage> {
                   TextField(
                     controller: priceCtrl,
                     decoration: const InputDecoration(
-                        labelText: 'Preço de venda (R\$)'),
+                      labelText: 'Preço de venda (R\$)',
+                    ),
                     keyboardType:
                         const TextInputType.numberWithOptions(decimal: true),
                   ),

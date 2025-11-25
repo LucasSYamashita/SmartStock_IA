@@ -41,7 +41,7 @@ abstract class ChatBackend {
 /// 🔹 BACKEND PRINCIPAL: Cloud Function (IA + Firestore remoto)
 class CloudFunctionsChatBackend implements ChatBackend {
   final FirebaseFunctions functions =
-      FirebaseFunctions.instanceFor(region: 'southamerica-east1');
+      FirebaseFunctions.instanceFor(region: 'us-central1');
   final ChatBackend fallback;
 
   CloudFunctionsChatBackend({required this.fallback});
